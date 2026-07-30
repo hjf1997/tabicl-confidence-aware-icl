@@ -1,17 +1,21 @@
 import argparse
 import logging
+import sys
 from datetime import datetime
-import torch.multiprocessing as mp
 from pathlib import Path
 
-from config import PipelineConfig, DataConfig, TabICLConfig, MultiGPUConfig, PROJECT_ROOT
+sys.path.insert(0, str(Path(__file__).resolve().parent / "supporting_set_constr"))
+
+import torch.multiprocessing as mp
+
+from config import PipelineConfig, DataConfig, TabICLConfig, MultiGPUConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH
 from pipeline import ConfidenceAwarePipeline
 
 
 def main():
     parser = argparse.ArgumentParser(description="Confidence-Aware Support Set Selection for TabICL")
     parser.add_argument("--setting", type=str, required=True, help="Data setting folder name (e.g., setting1)")
-    parser.add_argument("--model-path", type=str, default=None, help="Local TabICL checkpoint path (for offline env)")
+    parser.add_argument("--model-path", type=str, default=str(DEFAULT_MODEL_PATH), help="Local TabICL checkpoint path")
     parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
     parser.add_argument("--top-features", type=int, default=150, help="Number of top SHAP features to use")
     parser.add_argument("--K", type=int, default=20, help="Number of diverse support sets")

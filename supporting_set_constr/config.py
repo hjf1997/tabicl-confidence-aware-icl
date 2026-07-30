@@ -6,6 +6,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 FEATURE_IMPORTANCE_PATH = PROJECT_ROOT / "exp" / "20260717_0807_importance" / "consensus_top_features.csv"
 
+DEFAULT_MODEL_PATH = PROJECT_ROOT / "tabicl-main" / "checkpoints" / "tabicl-classifier-v2-20260212.ckpt"
+
 
 @dataclass
 class DataConfig:
@@ -35,7 +37,7 @@ class DataConfig:
 
 @dataclass
 class TabICLConfig:
-    model_path: Optional[str] = None
+    model_path: Optional[str] = str(DEFAULT_MODEL_PATH)
     n_estimators: int = 8
     batch_size: int = 8
     softmax_temperature: float = 0.9
