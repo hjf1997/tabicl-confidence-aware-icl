@@ -48,8 +48,12 @@ class SupportSetSelector:
         neg_prediction_vectors: np.ndarray,
         neg_classification: dict,
         random_state: int = 42,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Build a single optimized support set (1000 total, balanced 500/500)."""
+    ) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+        """Build a single optimized support set (1000 total, balanced 500/500).
+
+        Returns:
+            ((X_support, y_support), (pos_indices, neg_indices))
+        """
         target = self.config.target_size
         n_pos = int(target * self.config.positive_ratio)
         n_neg_reliable = int(target * self.config.negative_reliable_ratio)
@@ -95,7 +99,7 @@ class SupportSetSelector:
         X_support = np.vstack([X_pos_sel, X_neg_sel])
         y_support = np.concatenate([y_pos_sel, y_neg_sel])
 
-        return X_support, y_support
+        return (X_support, y_support), (pos_selected_idx, all_neg_idx)
 
     def build_K_optimized_support_sets(
         self,
@@ -112,7 +116,7 @@ class SupportSetSelector:
         """Build K diverse optimized support sets (different random seeds for k-means)."""
         support_sets = []
         for k in range(K):
-            ss = self.build_optimized_support_set(
+            (X_sup, y_sup), _ = self.build_optimized_support_set(
                 X_positives, y_positives,
                 X_negatives, y_negatives,
                 neg_reliability_scores,
@@ -120,7 +124,7 @@ class SupportSetSelector:
                 neg_classification,
                 random_state=base_random_state + k,
             )
-            support_sets.append(ss)
+            support_sets.append((X_sup, y_sup))
         return support_sets
 
     def _diversity_sample_features(

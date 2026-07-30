@@ -1,24 +1,34 @@
 import argparse
 import logging
+from datetime import datetime
 import torch.multiprocessing as mp
 from pathlib import Path
 
-from config import PipelineConfig, DataConfig, TabICLConfig, MultiGPUConfig
+from config import PipelineConfig, DataConfig, TabICLConfig, MultiGPUConfig, PROJECT_ROOT
 from pipeline import ConfidenceAwarePipeline
 
 
 def main():
     parser = argparse.ArgumentParser(description="Confidence-Aware Support Set Selection for TabICL")
-    parser.add_argument("--data-dir", type=str, required=True, help="Directory containing training.csv, validation.csv, test.csv")
-    parser.add_argument("--output-dir", type=str, default="./output", help="Directory for output files")
+    parser.add_argument("--setting", type=str, required=True, help="Data setting folder name (e.g., setting1)")
     parser.add_argument("--model-path", type=str, default=None, help="Local TabICL checkpoint path (for offline env)")
     parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
+    parser.add_argument("--top-features", type=int, default=150, help="Number of top SHAP features to use")
     parser.add_argument("--K", type=int, default=20, help="Number of diverse support sets")
     parser.add_argument("--support-size", type=int, default=500, help="Initial support set size per set")
     parser.add_argument("--target-size", type=int, default=1000, help="Optimized support set size")
     parser.add_argument("--max-iterations", type=int, default=5, help="Max EM iterations")
     parser.add_argument("--eval-test", action="store_true", help="Run final evaluation on test set after pipeline converges")
+    parser.add_argument("--exp-tag", type=str, default=None, help="Custom experiment tag (default: auto-generated timestamp)")
     args = parser.parse_args()
+
+    # Generate experiment output directory: exp/YYYYMMDD_HHMM_support_set_constr/
+    if args.exp_tag:
+        exp_name = args.exp_tag
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        exp_name = f"{timestamp}_support_set_constr_{args.setting}"
+    output_dir = PROJECT_ROOT / "exp" / exp_name
 
     logging.basicConfig(
         level=logging.INFO,
@@ -28,8 +38,11 @@ def main():
 
     config = PipelineConfig(
         max_iterations=args.max_iterations,
-        output_dir=Path(args.output_dir),
-        data=DataConfig(data_dir=Path(args.data_dir)),
+        output_dir=output_dir,
+        data=DataConfig(
+            setting=args.setting,
+            top_features=args.top_features,
+        ),
         tabicl=TabICLConfig(model_path=args.model_path),
         gpu=MultiGPUConfig(
             num_gpus=args.num_gpus,
@@ -39,6 +52,10 @@ def main():
     config.reliability.K = args.K
     config.reliability.support_set_size = args.support_size
     config.support_set.target_size = args.target_size
+
+    logging.info("Experiment output: %s", output_dir)
+    logging.info("Data setting: %s", args.setting)
+    logging.info("Top features: %d", args.top_features)
 
     pipeline = ConfidenceAwarePipeline(config)
     results = pipeline.run()
@@ -51,11 +68,10 @@ def main():
 
     if args.eval_test:
         from data_loader import DataLoader
-        import pandas as pd
         dl = DataLoader(config.data)
         data = dl.load_all()
-        X_test, y_test = data["test"]
-        X_test_np = X_test.values if isinstance(X_test, pd.DataFrame) else X_test
+        X_test, y_test, _ = data["test"]
+        X_test_np = X_test.values
         test_metrics = pipeline.final_evaluation(X_test_np, y_test)
         logging.info("Test set metrics: %s", test_metrics)
 

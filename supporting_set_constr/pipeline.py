@@ -1,12 +1,14 @@
+import json
 import numpy as np
 import pandas as pd
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from config import PipelineConfig
+from config import PipelineConfig, FEATURE_IMPORTANCE_PATH
 from data_loader import DataLoader
-from multi_gpu_inference import MultiGPUInference
+from multi_gpu_inference import MultiGPUInference, estimate_max_query_chunk
 from reliability_scorer import ReliabilityScorer
 from support_set_selector import SupportSetSelector
 from evaluate import Evaluator
@@ -31,24 +33,25 @@ class ConfidenceAwarePipeline:
 
         # Load data
         data = self.data_loader.load_all()
-        X_train, y_train = data["train"]
-        X_val, y_val = data["val"]
+        X_train, y_train, ids_train = data["train"]
+        X_val, y_val, ids_val = data["val"]
 
-        X_train_np = X_train.values if isinstance(X_train, pd.DataFrame) else X_train
+        feature_columns = X_train.columns.tolist()
+        X_train_np = X_train.values
         y_train_np = y_train
 
-        X_pos, y_pos = self.data_loader.get_positive_samples(X_train, y_train)
-        X_neg, y_neg = self.data_loader.get_negative_samples(X_train, y_train)
-        X_pos_np = X_pos.values if isinstance(X_pos, pd.DataFrame) else X_pos
-        X_neg_np = X_neg.values if isinstance(X_neg, pd.DataFrame) else X_neg
+        X_pos, y_pos, ids_pos = self.data_loader.get_positive_samples(X_train, y_train, ids_train)
+        X_neg, y_neg, ids_neg = self.data_loader.get_negative_samples(X_train, y_train, ids_train)
+        X_pos_np = X_pos.values
+        X_neg_np = X_neg.values
         y_pos_np = y_pos
         y_neg_np = y_neg
 
-        X_val_np = X_val.values if isinstance(X_val, pd.DataFrame) else X_val
+        X_val_np = X_val.values
 
         logger.info(
-            "Data loaded: train=%d (pos=%d, neg=%d), val=%d",
-            len(y_train), len(y_pos), len(y_neg), len(y_val),
+            "Data loaded: train=%d (pos=%d, neg=%d), val=%d, features=%d",
+            len(y_train), len(y_pos), len(y_neg), len(y_val), len(feature_columns),
         )
 
         # Stage A: initial random support sets
@@ -62,6 +65,7 @@ class ConfidenceAwarePipeline:
         )
 
         best_support_set = None
+        best_support_ids = None
         best_metric = 0.0
 
         for iteration in range(config.max_iterations):
@@ -86,11 +90,9 @@ class ConfidenceAwarePipeline:
             logger.info("Stage C: Reliable=%d, Uncertain=%d, Suspect=%d",
                         n_reliable, n_uncertain, n_suspect)
 
-            # Save reliability scores and components as CSV
-            scores_path = output_dir / f"reliability_scores_iter{iteration + 1}.npy"
-            np.save(scores_path, reliability_scores)
-
+            # Save reliability scores with ar_case_no
             df_scores = pd.DataFrame({
+                config.data.id_col: ids_neg.values,
                 "reliability_score": reliability_scores,
                 "mu": self.scorer.components_["mu"],
                 "sigma": self.scorer.components_["sigma"],
@@ -106,7 +108,7 @@ class ConfidenceAwarePipeline:
 
             # Stage D: build optimized support set
             logger.info("Stage D: Building optimized support set (size=%d)", config.support_set.target_size)
-            optimized_support = self.selector.build_optimized_support_set(
+            optimized_support, selected_indices = self.selector.build_optimized_support_set(
                 X_positives=X_pos_np,
                 y_positives=y_pos_np,
                 X_negatives=X_neg_np,
@@ -116,6 +118,13 @@ class ConfidenceAwarePipeline:
                 neg_classification=classification,
                 random_state=42 + iteration,
             )
+
+            # Reconstruct ids for the support set
+            pos_indices, neg_indices = selected_indices
+            support_ids = pd.concat([
+                ids_pos.iloc[pos_indices].reset_index(drop=True),
+                ids_neg.iloc[neg_indices].reset_index(drop=True),
+            ], ignore_index=True)
 
             # Stage E: evaluate on validation set
             logger.info("Stage E: Evaluating on validation set")
@@ -135,9 +144,7 @@ class ConfidenceAwarePipeline:
             if current_metric > best_metric:
                 best_metric = current_metric
                 best_support_set = optimized_support
-                # Save best support set
-                np.save(output_dir / "best_support_X.npy", X_support)
-                np.save(output_dir / "best_support_y.npy", y_support)
+                best_support_ids = support_ids
 
             # Convergence check
             if iteration > 0:
@@ -167,13 +174,86 @@ class ConfidenceAwarePipeline:
         df_history.to_csv(output_dir / "metrics_history.csv", index=False)
         logger.info("Metrics history saved to %s", output_dir / "metrics_history.csv")
 
-        # Save final support set as CSV
+        # Save final support set as CSV with ar_case_no and label
         if best_support_set is not None:
             X_best, y_best = best_support_set
-            df_support = pd.DataFrame(X_best, columns=X_train.columns if isinstance(X_train, pd.DataFrame) else None)
+            df_support = pd.DataFrame(X_best, columns=feature_columns)
+            df_support.insert(0, config.data.id_col, best_support_ids.values)
             df_support[config.data.label_col] = y_best
             df_support.to_csv(output_dir / "best_support_set.csv", index=False)
             logger.info("Best support set saved to %s", output_dir / "best_support_set.csv")
+
+        # Save artifact manifest
+        chunk_size = estimate_max_query_chunk(
+            n_support=config.reliability.support_set_size,
+            n_features=config.data.top_features,
+            n_estimators=config.tabicl.n_estimators,
+        )
+        manifest = {
+            "artifact_type": "support_set_construction",
+            "artifacts": {
+                "best_support_set": str(output_dir / "best_support_set.csv"),
+                "metrics_history": str(output_dir / "metrics_history.csv"),
+                "reliability_scores": [
+                    str(output_dir / f"reliability_scores_iter{i + 1}.csv")
+                    for i in range(len(self.history))
+                ],
+            },
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "dataset": {
+                "data_setting": config.data.setting,
+                "train_path": str(config.data.data_dir / config.data.train_file),
+                "validation_path": str(config.data.data_dir / config.data.val_file),
+                "test_path": str(config.data.data_dir / config.data.test_file),
+                "n_train": len(y_train),
+                "n_val": len(y_val),
+            },
+            "model": {
+                "model_type": "TabICLClassifier",
+                "model_path": config.tabicl.model_path,
+                "n_estimators": config.tabicl.n_estimators,
+                "batch_size": config.tabicl.batch_size,
+                "softmax_temperature": config.tabicl.softmax_temperature,
+                "kv_cache": config.tabicl.kv_cache,
+                "random_state": config.tabicl.random_state,
+                "chunk_size": chunk_size,
+                "max_gpu_workers": config.gpu.num_gpus,
+            },
+            "preprocessing": {
+                "feature_importance_path": str(FEATURE_IMPORTANCE_PATH),
+                "top_features": config.data.top_features,
+                "selected_features": feature_columns,
+            },
+            "pipeline": {
+                "K": config.reliability.K,
+                "support_set_size_initial": config.reliability.support_set_size,
+                "target_support_set_size": config.support_set.target_size,
+                "max_iterations": config.max_iterations,
+                "convergence_threshold": config.convergence_threshold,
+                "eval_metric": config.eval_metric,
+                "iterations_run": len(self.history),
+                "best_metric": best_metric,
+            },
+            "reliability_scoring": {
+                "w_mean_prob": config.reliability.w_mean_prob,
+                "w_stability": config.reliability.w_stability,
+                "w_entropy": config.reliability.w_entropy,
+                "w_agreement": config.reliability.w_agreement,
+                "w_density": config.reliability.w_density,
+                "n_neighbors": config.reliability.n_neighbors,
+                "similarity_metric": config.reliability.similarity_metric,
+                "reliable_threshold": config.reliability.reliable_threshold,
+                "uncertain_threshold": config.reliability.uncertain_threshold,
+            },
+            "support_set_composition": {
+                "positive_ratio": config.support_set.positive_ratio,
+                "negative_reliable_ratio": config.support_set.negative_reliable_ratio,
+                "negative_boundary_ratio": config.support_set.negative_boundary_ratio,
+            },
+        }
+        with open(output_dir / "artifact_manifest.json", "w") as f:
+            json.dump(manifest, f, indent=2)
+        logger.info("Artifact manifest saved to %s", output_dir / "artifact_manifest.json")
 
         return {
             "best_metric": best_metric,

@@ -2,21 +2,40 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+FEATURE_IMPORTANCE_PATH = PROJECT_ROOT / "exp" / "20260717_0807_importance" / "consensus_top_features.csv"
+
 
 @dataclass
 class DataConfig:
-    data_dir: Path = Path("./data")
-    train_file: str = "training.csv"
-    val_file: str = "validation.csv"
-    test_file: str = "test.csv"
+    setting: str = "setting1"
     label_col: str = "label"
+    id_col: str = "ar_case_no"
     positive_class: int = 0  # bogus (reliable)
     negative_class: int = 1  # fraud (noisy)
+    top_features: int = 150
+
+    @property
+    def data_dir(self) -> Path:
+        return PROJECT_ROOT / "data" / self.setting
+
+    @property
+    def train_file(self) -> str:
+        return "tabular_dataset_train.csv"
+
+    @property
+    def val_file(self) -> str:
+        return "tabular_dataset_validation.csv"
+
+    @property
+    def test_file(self) -> str:
+        return "tabular_dataset_test.csv"
 
 
 @dataclass
 class TabICLConfig:
-    model_path: Optional[str] = None  # local checkpoint path (offline env)
+    model_path: Optional[str] = None
     n_estimators: int = 8
     batch_size: int = 8
     softmax_temperature: float = 0.9
@@ -51,8 +70,8 @@ class ReliabilityConfig:
 class SupportSetConfig:
     target_size: int = 1000
     positive_ratio: float = 0.50
-    negative_reliable_ratio: float = 0.375  # 375 out of 1000
-    negative_boundary_ratio: float = 0.125  # 125 out of 1000
+    negative_reliable_ratio: float = 0.375
+    negative_boundary_ratio: float = 0.125
     diversity_lambda: float = 0.3
 
 
@@ -61,7 +80,7 @@ class PipelineConfig:
     max_iterations: int = 5
     convergence_threshold: float = 0.005
     eval_metric: str = "pr_auc"
-    output_dir: Path = Path("./output")
+    output_dir: Path = Path("./exp")
     data: DataConfig = field(default_factory=DataConfig)
     tabicl: TabICLConfig = field(default_factory=TabICLConfig)
     gpu: MultiGPUConfig = field(default_factory=MultiGPUConfig)
