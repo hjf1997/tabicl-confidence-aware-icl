@@ -159,18 +159,8 @@ class ConfidenceAwarePipeline:
                     logger.info("Converged at iteration %d", iteration + 1)
                     break
 
-            # Prepare K new diverse support sets for next iteration
-            support_sets = self.selector.build_K_optimized_support_sets(
-                X_positives=X_pos_np,
-                y_positives=y_pos_np,
-                X_negatives=X_neg_np,
-                y_negatives=y_neg_np,
-                neg_reliability_scores=reliability_scores,
-                neg_prediction_vectors=self.scorer.prediction_vectors_,
-                neg_classification=classification,
-                K=config.reliability.K,
-                base_random_state=42 + (iteration + 1) * 100,
-            )
+            # Keep using initial random support sets for Stage B scoring.
+            # Optimized sets are homogeneous and degrade prediction diversity.
 
         # Save metrics history as CSV
         df_history = pd.DataFrame(self.history)
