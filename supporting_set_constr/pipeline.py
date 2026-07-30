@@ -266,8 +266,12 @@ class ConfidenceAwarePipeline:
     def final_evaluation(self, X_test: np.ndarray, y_test: np.ndarray) -> Dict:
         """Run final evaluation on test set using saved best support set."""
         output_dir = Path(self.config.output_dir)
-        X_support = np.load(output_dir / "best_support_X.npy")
-        y_support = np.load(output_dir / "best_support_y.npy")
+        df_support = pd.read_csv(output_dir / "best_support_set.csv")
+        y_support = df_support[self.config.data.label_col].values
+        X_support = df_support[self.data_loader.selected_features].values.astype(np.float64)
 
-        test_proba = self.multi_gpu.predict_proba_parallel(X_support, y_support, X_test)
+        test_proba = self.multi_gpu.predict_proba_parallel(
+            X_support, y_support, X_test,
+            desc="Final test evaluation",
+        )
         return self.evaluator.compute_all(y_test, test_proba)
