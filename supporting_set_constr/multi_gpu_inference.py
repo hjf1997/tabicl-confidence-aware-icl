@@ -1,17 +1,17 @@
 import numpy as np
 import math
 import torch.multiprocessing as mp
+from tqdm import tqdm
 from typing import List, Tuple, Optional
 
 from config import MultiGPUConfig, TabICLConfig
 
 
 # Memory estimation coefficients profiled from TabICL source.
-# The row encoder (tf_row) is the bottleneck on T4s:
-#   peak_mem_MB = coef[0]*eff_batch + coef[1]*n_features + coef[2]*eff_batch*n_features + intercept
-# where eff_batch = n_estimators * (n_support + n_query)
 _ROW_COEFS = (-2.07e-05, 2.27e-04, 5.37e-03)
 _ROW_INTERCEPT = 138.54  # MB
+
+_PROGRESS_MSG = "__progress__"
 
 
 def estimate_max_query_chunk(
@@ -21,23 +21,16 @@ def estimate_max_query_chunk(
     gpu_memory_mb: float = 16384.0,
     safety_factor: float = 0.7,
 ) -> int:
-    """Estimate max query samples per forward pass based on T4 memory constraints.
-
-    Uses the row encoder (tf_row) as the bottleneck since its effective batch
-    size scales with n_estimators * total_samples.
-    """
+    """Estimate max query samples per forward pass based on T4 memory constraints."""
     available = gpu_memory_mb * safety_factor
     c0, c1, c2 = _ROW_COEFS
 
-    # Solve: available = c0*eff_bs + c1*n_features + c2*eff_bs*n_features + intercept
-    # where eff_bs = n_estimators * (n_support + n_query)
     rhs = available - c1 * n_features - _ROW_INTERCEPT
     per_sample_cost = (c0 + c2 * n_features) * n_estimators
 
     max_total_samples = int(rhs / per_sample_cost)
     max_query = max_total_samples - n_support
 
-    # Clamp to reasonable bounds
     max_query = max(100, min(max_query, 50000))
     return max_query
 
@@ -52,6 +45,7 @@ def _worker_inference(
     tabicl_kwargs: dict,
     chunk_size: int,
     result_queue: mp.Queue,
+    progress_queue: mp.Queue,
 ):
     from tabicl import TabICLClassifier
 
@@ -61,13 +55,15 @@ def _worker_inference(
     n = len(X_query)
     if n <= chunk_size:
         proba = clf.predict_proba(X_query)
+        progress_queue.put((_PROGRESS_MSG, n))
     else:
-        chunks = math.ceil(n / chunk_size)
+        n_chunks = math.ceil(n / chunk_size)
         proba_parts = []
-        for i in range(chunks):
+        for i in range(n_chunks):
             start = i * chunk_size
             end = min((i + 1) * chunk_size, n)
             proba_parts.append(clf.predict_proba(X_query[start:end]))
+            progress_queue.put((_PROGRESS_MSG, end - start))
         proba = np.vstack(proba_parts)
 
     result_queue.put((gpu_id, query_indices, proba))
@@ -82,6 +78,7 @@ def _worker_multi_support(
     tabicl_kwargs: dict,
     chunk_size: int,
     result_queue: mp.Queue,
+    progress_queue: mp.Queue,
 ):
     from tabicl import TabICLClassifier
 
@@ -104,6 +101,8 @@ def _worker_multi_support(
             proba = np.vstack(proba_parts)
 
         results.append((global_idx, proba[:, 1]))
+        progress_queue.put((_PROGRESS_MSG, 1))
+
     result_queue.put((gpu_id, results))
 
 
@@ -134,6 +133,7 @@ class MultiGPUInference:
         X_support: np.ndarray,
         y_support: np.ndarray,
         X_query: np.ndarray,
+        desc: str = "Inference",
     ) -> np.ndarray:
         """Run inference splitting query data across GPUs. Returns (n_query, n_classes)."""
         n = len(X_query)
@@ -144,6 +144,7 @@ class MultiGPUInference:
         chunks = np.array_split(np.arange(n), n_gpus)
 
         result_queue = mp.Queue()
+        progress_queue = mp.Queue()
         processes = []
 
         for gpu_id, idx_chunk in enumerate(chunks):
@@ -161,15 +162,37 @@ class MultiGPUInference:
                     self.tabicl_kwargs,
                     chunk_size,
                     result_queue,
+                    progress_queue,
                 ),
             )
             processes.append(p)
             p.start()
 
+        pbar = tqdm(total=n, desc=desc, unit="samples")
         results = {}
-        for _ in processes:
-            gpu_id, indices, proba = result_queue.get()
-            results[gpu_id] = (indices, proba)
+        while len(results) < len(processes):
+            try:
+                msg = progress_queue.get_nowait()
+                if msg[0] == _PROGRESS_MSG:
+                    pbar.update(msg[1])
+            except Exception:
+                pass
+
+            try:
+                gpu_id, indices, proba = result_queue.get(timeout=0.1)
+                results[gpu_id] = (indices, proba)
+            except Exception:
+                pass
+
+        # Drain remaining progress
+        while not progress_queue.empty():
+            try:
+                msg = progress_queue.get_nowait()
+                if msg[0] == _PROGRESS_MSG:
+                    pbar.update(msg[1])
+            except Exception:
+                break
+        pbar.close()
 
         for p in processes:
             p.join()
@@ -185,6 +208,7 @@ class MultiGPUInference:
         self,
         support_sets: List[Tuple[np.ndarray, np.ndarray]],
         X_query: np.ndarray,
+        desc: str = "Multi-support inference",
     ) -> np.ndarray:
         """Run K support sets against all query samples across GPUs.
 
@@ -209,6 +233,7 @@ class MultiGPUInference:
             X_query_np = X_query.values
 
         result_queue = mp.Queue()
+        progress_queue = mp.Queue()
         processes = []
 
         for gpu_id in range(n_gpus):
@@ -225,16 +250,41 @@ class MultiGPUInference:
                     self.tabicl_kwargs,
                     chunk_size,
                     result_queue,
+                    progress_queue,
                 ),
             )
             processes.append(p)
             p.start()
 
+        pbar = tqdm(total=K, desc=desc, unit="support_sets")
         predictions = np.zeros((len(X_query_np), K))
-        for _ in processes:
-            gpu_id, results_list = result_queue.get()
-            for global_idx, proba_col in results_list:
-                predictions[:, global_idx] = proba_col
+        results_collected = 0
+
+        while results_collected < len(processes):
+            try:
+                msg = progress_queue.get_nowait()
+                if msg[0] == _PROGRESS_MSG:
+                    pbar.update(msg[1])
+            except Exception:
+                pass
+
+            try:
+                gpu_id, results_list = result_queue.get(timeout=0.1)
+                for global_idx, proba_col in results_list:
+                    predictions[:, global_idx] = proba_col
+                results_collected += 1
+            except Exception:
+                pass
+
+        # Drain remaining progress
+        while not progress_queue.empty():
+            try:
+                msg = progress_queue.get_nowait()
+                if msg[0] == _PROGRESS_MSG:
+                    pbar.update(msg[1])
+            except Exception:
+                break
+        pbar.close()
 
         for p in processes:
             p.join()

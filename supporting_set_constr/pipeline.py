@@ -77,6 +77,7 @@ class ConfidenceAwarePipeline:
             predictions_matrix = self.multi_gpu.predict_proba_multi_support(
                 support_sets=support_sets,
                 X_query=X_neg_np,
+                desc=f"Stage B iter {iteration + 1}: scoring fraud samples",
             )
 
             # Compute reliability scores
@@ -131,6 +132,7 @@ class ConfidenceAwarePipeline:
             X_support, y_support = optimized_support
             val_proba = self.multi_gpu.predict_proba_parallel(
                 X_support, y_support, X_val_np,
+                desc=f"Stage E iter {iteration + 1}: validation eval",
             )
             metrics = self.evaluator.compute_all(y_val, val_proba)
             metrics["iteration"] = iteration + 1
