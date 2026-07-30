@@ -134,8 +134,9 @@ class SupportSetSelector:
         if len(X) <= n:
             return np.arange(len(X))
 
+        X_float = np.asarray(X, dtype=np.float64)
         km = KMeans(n_clusters=n, random_state=random_state, n_init=3)
-        km.fit(X)
+        km.fit(X_float)
 
         selected = []
         for c in range(n):
@@ -143,7 +144,7 @@ class SupportSetSelector:
             cluster_indices = np.where(cluster_mask)[0]
             if len(cluster_indices) == 0:
                 continue
-            dists = np.linalg.norm(X[cluster_indices] - km.cluster_centers_[c], axis=1)
+            dists = np.linalg.norm(X_float[cluster_indices] - km.cluster_centers_[c], axis=1)
             selected.append(cluster_indices[np.argmin(dists)])
 
         return np.array(selected)
@@ -155,7 +156,7 @@ class SupportSetSelector:
         if len(pred_vectors) <= n:
             return np.arange(len(pred_vectors))
 
-        preds_norm = normalize(pred_vectors, norm="l2")
+        preds_norm = normalize(np.asarray(pred_vectors, dtype=np.float64), norm="l2")
         km = KMeans(n_clusters=n, random_state=random_state, n_init=3)
         km.fit(preds_norm)
 
