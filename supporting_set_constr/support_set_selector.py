@@ -7,9 +7,11 @@ from config import SupportSetConfig, ReliabilityConfig
 
 
 class SupportSetSelector:
-    def __init__(self, config: SupportSetConfig, reliability_config: ReliabilityConfig):
+    def __init__(self, config: SupportSetConfig, reliability_config: ReliabilityConfig,
+                 neg_sampling_strategy: str = "random"):
         self.config = config
         self.reliability_config = reliability_config
+        self.neg_sampling_strategy = neg_sampling_strategy
 
     def build_initial_support_sets(
         self,
@@ -59,40 +61,52 @@ class SupportSetSelector:
         n_neg_reliable = int(target * self.config.negative_reliable_ratio)
         n_neg_boundary = target - n_pos - n_neg_reliable
 
-        # Select diverse positives via feature-space k-means
+        # Select positives via feature-space k-means diversity
         pos_selected_idx = self._diversity_sample_features(X_positives, n_pos, random_state)
         X_pos_sel = X_positives[pos_selected_idx]
         y_pos_sel = y_positives[pos_selected_idx]
 
-        # Select diverse reliable negatives via prediction-space k-means
+        # Select negatives based on strategy
+        n_neg_total = n_neg_reliable + n_neg_boundary
         reliable_mask = neg_classification["reliable"]
-        if reliable_mask.sum() < n_neg_reliable:
-            # Fall back: use all reliable + sample from uncertain
-            n_from_reliable = int(reliable_mask.sum())
-            n_extra = n_neg_reliable - n_from_reliable
-            reliable_idx = np.where(reliable_mask)[0]
-            uncertain_mask = neg_classification["uncertain"]
-            uncertain_idx = np.where(uncertain_mask)[0]
-            rng = np.random.default_rng(random_state)
-            extra_idx = rng.choice(uncertain_idx, size=min(n_extra, len(uncertain_idx)), replace=False)
-            neg_reliable_idx = np.concatenate([reliable_idx, extra_idx])
-        else:
-            neg_reliable_selected = self._diversity_sample_prediction_space(
-                neg_prediction_vectors[reliable_mask], n_neg_reliable, random_state
-            )
-            neg_reliable_idx = np.where(reliable_mask)[0][neg_reliable_selected]
-
-        # Select boundary negatives from uncertain zone (closest to reliable threshold)
         uncertain_mask = neg_classification["uncertain"]
-        if uncertain_mask.sum() > 0:
-            neg_boundary_idx = self._boundary_sample(
-                neg_reliability_scores[uncertain_mask], n_neg_boundary
-            )
-            neg_boundary_idx = np.where(uncertain_mask)[0][neg_boundary_idx]
-        else:
-            neg_boundary_idx = np.array([], dtype=int)
+        rng = np.random.default_rng(random_state)
 
-        all_neg_idx = np.concatenate([neg_reliable_idx, neg_boundary_idx])
+        if self.neg_sampling_strategy == "random":
+            # Random sampling from reliable negatives (Option B)
+            reliable_idx = np.where(reliable_mask)[0]
+            if len(reliable_idx) >= n_neg_total:
+                all_neg_idx = rng.choice(reliable_idx, size=n_neg_total, replace=False)
+            else:
+                # Use all reliable + random from uncertain
+                uncertain_idx = np.where(uncertain_mask)[0]
+                n_extra = n_neg_total - len(reliable_idx)
+                extra_idx = rng.choice(uncertain_idx, size=min(n_extra, len(uncertain_idx)), replace=False)
+                all_neg_idx = np.concatenate([reliable_idx, extra_idx])
+        else:
+            # Original diversity strategy
+            if reliable_mask.sum() < n_neg_reliable:
+                n_from_reliable = int(reliable_mask.sum())
+                n_extra = n_neg_reliable - n_from_reliable
+                reliable_idx = np.where(reliable_mask)[0]
+                uncertain_idx = np.where(uncertain_mask)[0]
+                extra_idx = rng.choice(uncertain_idx, size=min(n_extra, len(uncertain_idx)), replace=False)
+                neg_reliable_idx = np.concatenate([reliable_idx, extra_idx])
+            else:
+                neg_reliable_selected = self._diversity_sample_prediction_space(
+                    neg_prediction_vectors[reliable_mask], n_neg_reliable, random_state
+                )
+                neg_reliable_idx = np.where(reliable_mask)[0][neg_reliable_selected]
+
+            if uncertain_mask.sum() > 0:
+                neg_boundary_idx = self._boundary_sample(
+                    neg_reliability_scores[uncertain_mask], n_neg_boundary
+                )
+                neg_boundary_idx = np.where(uncertain_mask)[0][neg_boundary_idx]
+            else:
+                neg_boundary_idx = np.array([], dtype=int)
+
+            all_neg_idx = np.concatenate([neg_reliable_idx, neg_boundary_idx])
         X_neg_sel = X_negatives[all_neg_idx]
         y_neg_sel = y_negatives[all_neg_idx]
 

@@ -22,7 +22,8 @@ class ConfidenceAwarePipeline:
         self.data_loader = DataLoader(config.data)
         self.multi_gpu = MultiGPUInference(config.gpu, config.tabicl)
         self.scorer = ReliabilityScorer(config.reliability)
-        self.selector = SupportSetSelector(config.support_set, config.reliability)
+        self.selector = SupportSetSelector(config.support_set, config.reliability,
+                                                 neg_sampling_strategy=config.support_set.neg_sampling_strategy)
         self.evaluator = Evaluator()
         self.history: List[Dict] = []
 

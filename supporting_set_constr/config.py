@@ -74,7 +74,7 @@ class SupportSetConfig:
     positive_ratio: float = 0.50
     negative_reliable_ratio: float = 0.375
     negative_boundary_ratio: float = 0.125
-    diversity_lambda: float = 0.3
+    neg_sampling_strategy: str = "random"
 
 
 @dataclass

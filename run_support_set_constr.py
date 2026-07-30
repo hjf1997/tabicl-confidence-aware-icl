@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--max-iterations", type=int, default=5, help="Max EM iterations")
     parser.add_argument("--reliable-threshold", type=float, default=0.75, help="Reliability score threshold for reliable negatives")
     parser.add_argument("--uncertain-threshold", type=float, default=0.45, help="Reliability score threshold for uncertain vs suspect")
+    parser.add_argument("--neg-sampling", type=str, default="random", choices=["random", "diversity"], help="Negative sampling strategy: random from reliable set, or diversity via k-means")
     parser.add_argument("--eval-test", action="store_true", help="Run final evaluation on test set after pipeline converges")
     parser.add_argument("--exp-tag", type=str, default=None, help="Custom experiment tag (default: auto-generated timestamp)")
     args = parser.parse_args()
@@ -60,6 +61,7 @@ def main():
     config.reliability.reliable_threshold = args.reliable_threshold
     config.reliability.uncertain_threshold = args.uncertain_threshold
     config.support_set.target_size = args.target_size
+    config.support_set.neg_sampling_strategy = args.neg_sampling
 
     logging.info("Experiment output: %s", output_dir)
     logging.info("Data setting: %s", args.setting)
