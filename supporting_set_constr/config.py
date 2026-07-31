@@ -70,10 +70,6 @@ class ReliabilityConfig:
 
 @dataclass
 class SupportSetConfig:
-    target_size: int = 1000
-    positive_ratio: float = 0.50
-    negative_reliable_ratio: float = 0.375
-    negative_boundary_ratio: float = 0.125
     neg_sampling_strategy: str = "random"
 
 

@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Confidence-Aware Support Set Selection for TabICL</title>
+    <style>
+        :root {
+            --bg: #fafafa;
+            --text: #1a1a1a;
+            --accent: #2563eb;
+            --accent-light: #dbeafe;
+            --border: #e5e7eb;
+            --code-bg: #f3f4f6;
+            --card-bg: #ffffff;
+            --formula-bg: #f8fafc;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.7;
+            color: var(--text);
+            background: var(--bg);
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 { font-size: 1.8rem; margin-bottom: 0.5rem; color: var(--accent); }
+        h2 { font-size: 1.4rem; margin-top: 2.5rem; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 2px solid var(--accent-light); }
+        h3 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.7rem; }
+        p { margin-bottom: 1rem; }
+        .subtitle { color: #6b7280; font-size: 0.95rem; margin-bottom: 2rem; }
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+        }
+        .card-title { font-weight: 600; margin-bottom: 0.5rem; }
+        .formula {
+            background: var(--formula-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            font-family: 'Georgia', serif;
+            font-size: 1.05rem;
+            text-align: center;
+        }
+        .formula .var { font-style: italic; }
+        .formula .sub { font-size: 0.75em; vertical-align: sub; }
+        .formula .sup { font-size: 0.75em; vertical-align: super; }
+        code {
+            background: var(--code-bg);
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.9rem;
+        }
+        pre {
+            background: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 1rem;
+            overflow-x: auto;
+            margin: 1rem 0;
+            font-size: 0.85rem;
+            line-height: 1.5;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.6rem 1rem;
+            text-align: left;
+        }
+        th { background: var(--accent-light); font-weight: 600; }
+        tr:nth-child(even) { background: var(--formula-bg); }
+        .flowchart {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+            font-family: monospace;
+            font-size: 0.85rem;
+            white-space: pre;
+            line-height: 1.6;
+            overflow-x: auto;
+        }
+        .highlight { background: #fef3c7; padding: 0.1rem 0.3rem; border-radius: 3px; }
+        .tag {
+            display: inline-block;
+            background: var(--accent-light);
+            color: var(--accent);
+            padding: 0.1rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+        li { margin-bottom: 0.4rem; }
+        .toc { margin: 1.5rem 0; }
+        .toc a { color: var(--accent); text-decoration: none; }
+        .toc a:hover { text-decoration: underline; }
+        .toc li { margin-bottom: 0.3rem; }
+        .insight {
+            border-left: 4px solid var(--accent);
+            padding: 0.8rem 1rem;
+            margin: 1rem 0;
+            background: var(--accent-light);
+            border-radius: 0 6px 6px 0;
+        }
+        .warning {
+            border-left: 4px solid #f59e0b;
+            padding: 0.8rem 1rem;
+            margin: 1rem 0;
+            background: #fef3c7;
+            border-radius: 0 6px 6px 0;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Confidence-Aware Support Set Selection for TabICL</h1>
+<p class="subtitle">Under Asymmetric Label Noise with Prediction-Behavior Space Analysis</p>
+
+<div class="toc">
+    <strong>Contents</strong>
+    <ol>
+        <li><a href="#background">Background &amp; Problem Statement</a></li>
+        <li><a href="#motivation">Motivation</a></li>
+        <li><a href="#algorithm">Core Algorithm</a></li>
+        <li><a href="#scoring">Reliability Scoring in Detail</a></li>
+        <li><a href="#support-set">Support Set Construction</a></li>
+        <li><a href="#lessons">Lessons Learned from Experiments</a></li>
+        <li><a href="#enhancements">Future Enhancements</a></li>
+    </ol>
+</div>
+
+<!-- ==================== SECTION 1 ==================== -->
+<h2 id="background">1. Background &amp; Problem Statement</h2>
+
+<h3>1.1 The Setting</h3>
+<p>We have a binary classification task:</p>
+<table>
+    <tr><th>Label</th><th>Class</th><th>Label Reliability</th><th>Proportion</th></tr>
+    <tr><td>0</td><td>Bogus</td><td><span class="highlight">Highly reliable</span></td><td>~25%</td></tr>
+    <tr><td>1</td><td>Fraud</td><td>Noisy (may contain mislabeled bogus)</td><td>~75%</td></tr>
+</table>
+
+<p>This is an <strong>asymmetric label noise</strong> problem: one class has trustworthy labels while the other contains errors. Some cases labeled "fraud" are actually bogus cases that were missed or mislabeled.</p>
+
+<h3>1.2 The Model: TabICL</h3>
+<p>TabICL is a pre-trained transformer for tabular data that performs <strong>in-context learning</strong> (ICL). Unlike traditional models:</p>
+<ul>
+    <li>It is <strong>frozen</strong> &mdash; no fine-tuning or gradient updates</li>
+    <li>It receives a <strong>support set</strong> (training examples) and a <strong>query set</strong> (samples to predict) in a single forward pass</li>
+    <li>Learning happens through attention over the support set, not weight updates</li>
+</ul>
+
+<div class="card">
+    <div class="card-title">Key Implication</div>
+    <p>Since the model cannot be optimized, the <strong>only lever for improving performance is the support set itself</strong>. The quality and composition of the support set <em>is</em> the model's "training".</p>
+</div>
+
+<div class="formula">
+    performance = <var>f</var>(label quality, support-set composition)
+</div>
+
+<h3>1.3 The Problem</h3>
+<p>Given:</p>
+<ul>
+    <li><strong>P</strong> = reliable positives (bogus, ~2,500 in training)</li>
+    <li><strong>N</strong> = noisy negatives (fraud, ~7,500 in training, some mislabeled)</li>
+    <li><strong>f(&middot;)</strong> = frozen TabICL model</li>
+</ul>
+<p><strong>Goal:</strong> Construct an optimal support set that maximizes TabICL's ability to detect bogus cases, despite the noise in fraud labels.</p>
+
+<!-- ==================== SECTION 2 ==================== -->
+<h2 id="motivation">2. Motivation</h2>
+
+<h3>2.1 Why Not Just Use All Data?</h3>
+<p>TabICL has memory/compute constraints on support set size. With 150 features and T4 GPUs (16GB), practical support set size is ~1,000 samples. We must choose <em>which</em> 1,000 samples to include.</p>
+
+<h3>2.2 Why Not Random Sampling?</h3>
+<p>Random sampling from all fraud-labeled data includes mislabeled samples that confuse the model. If 10% of fraud labels are actually bogus, a random 500-sample fraud selection contains ~50 wrong labels &mdash; teaching the model incorrect patterns.</p>
+
+<h3>2.3 The Two-Stage Insight</h3>
+<p>The solution separates into two problems:</p>
+<ol>
+    <li><strong>Which fraud labels can we trust?</strong> (reliability scoring)</li>
+    <li><strong>Which trusted samples should teach the model?</strong> (support set selection)</li>
+</ol>
+
+<div class="insight">
+    <strong>EM Analogy:</strong> This resembles Expectation-Maximization.<br>
+    <strong>E-step:</strong> Estimate which labels are reliable (using model predictions).<br>
+    <strong>M-step:</strong> Optimize the support set (using reliable labels).<br>
+    The model's predictions inform label trust, and label trust informs the model's input.
+</div>
+
+<h3>2.4 Connection to Related Work</h3>
+<table>
+    <tr><th>Our Situation</th><th>Research Area</th></tr>
+    <tr><td>Positive labels reliable, negative labels noisy</td><td>Positive-Unlabeled (PU) Learning</td></tr>
+    <tr><td>One class has higher label quality</td><td>Asymmetric Label-Noise Learning</td></tr>
+    <tr><td>Only a subset of labels is trusted</td><td>Learning with Trusted Examples</td></tr>
+    <tr><td>Target class is rare and reliable</td><td>One-Class Classification</td></tr>
+</table>
+
+<!-- ==================== SECTION 3 ==================== -->
+<h2 id="algorithm">3. Core Algorithm</h2>
+
+<h3>3.1 High-Level Flow</h3>
+<div class="flowchart">
+Stage A: Build K=20 random stratified support sets (size 500 each)
+     |
+     v
+Stage B: For each fraud sample in training set,
+         run through all K support sets
+         --> K-dimensional prediction vector per sample
+     |
+     v
+Stage C: Compute reliability scores from prediction vectors
+         Threshold --> Reliable / Uncertain / Suspect
+     |
+     v
+Stage D: Construct optimized evaluation support set (1000 samples)
+         = 500 bogus (diversity sampled)
+         + 500 fraud (random from reliable set)
+     |
+     v
+Stage E: Evaluate on validation set (PR-AUC)
+         If improved --> save as best, repeat from Stage B
+         If converged --> stop
+</div>
+
+<h3>3.2 Critical Design Decision: Fixed Scoring Sets</h3>
+<div class="warning">
+    <strong>Lesson learned:</strong> The 20 random support sets used for scoring (Stage B) must remain fixed across all iterations. Replacing them with "optimized" sets creates homogeneous predictions that destroy the diversity needed for reliable scoring. See <a href="#lessons">Section 6</a> for details.
+</div>
+
+<h3>3.3 What Each Stage Does</h3>
+
+<table>
+    <tr><th>Stage</th><th>Input</th><th>Output</th><th>Purpose</th></tr>
+    <tr><td>A</td><td>Training data</td><td>20 random support sets</td><td>Create diverse "probes" for scoring</td></tr>
+    <tr><td>B</td><td>Fraud samples + 20 sets</td><td>Prediction matrix (N&times;20)</td><td>Measure prediction consistency</td></tr>
+    <tr><td>C</td><td>Prediction matrix</td><td>Reliability scores + classification</td><td>Identify trustworthy fraud labels</td></tr>
+    <tr><td>D</td><td>Reliable/uncertain indices</td><td>1000-sample support set</td><td>Build best teaching set for TabICL</td></tr>
+    <tr><td>E</td><td>Support set + validation</td><td>PR-AUC, F1, ROC-AUC</td><td>Measure if support set improved</td></tr>
+</table>
+
+<!-- ==================== SECTION 4 ==================== -->
+<h2 id="scoring">4. Reliability Scoring in Detail</h2>
+
+<h3>4.1 Prediction-Behavior Space</h3>
+<p>Since TabICL only returns probabilities (no internal embeddings), we define sample similarity through <strong>prediction behavior</strong>:</p>
+
+<div class="card">
+    <div class="card-title">Prediction Vector</div>
+    <p>For each fraud sample <var>x<sub>i</sub></var>, run it through K=20 different support sets:</p>
+    <div class="formula">
+        <var>v<sub>i</sub></var> = [P(fraud | S<sub>1</sub>), P(fraud | S<sub>2</sub>), ..., P(fraud | S<sub>20</sub>)]
+    </div>
+    <p>Samples that behave similarly across diverse contexts are "prediction-behavior neighbors."</p>
+</div>
+
+<p><strong>Intuition:</strong> A truly-fraud sample should be consistently classified as fraud regardless of which support set provides context. A mislabeled sample will be unstable &mdash; some support sets "recognize" it as bogus while others don't.</p>
+
+<h3>4.2 Five Scoring Components</h3>
+
+<table>
+    <tr><th>Component</th><th>Symbol</th><th>Formula</th><th>What It Measures</th></tr>
+    <tr>
+        <td>Mean Probability</td>
+        <td>&mu;<sub>i</sub></td>
+        <td>mean(v<sub>i</sub>)</td>
+        <td>How consistently the model says "fraud"</td>
+    </tr>
+    <tr>
+        <td>Stability</td>
+        <td>&sigma;<sub>i</sub></td>
+        <td>std(v<sub>i</sub>) / 0.5</td>
+        <td>Prediction variance (lower = more stable)</td>
+    </tr>
+    <tr>
+        <td>Entropy</td>
+        <td>H<sub>i</sub></td>
+        <td>-&mu; log<sub>2</sub>(&mu;) - (1-&mu;) log<sub>2</sub>(1-&mu;)</td>
+        <td>Model uncertainty (lower = more confident)</td>
+    </tr>
+    <tr>
+        <td>Neighborhood Agreement</td>
+        <td>A<sub>i</sub></td>
+        <td>fraction of k-NN with &mu; &gt; 0.5</td>
+        <td>Do similar-behaving samples also look like fraud?</td>
+    </tr>
+    <tr>
+        <td>Density</td>
+        <td>D<sub>i</sub></td>
+        <td>1 / mean_distance_to_kNN</td>
+        <td>Is this sample in a dense cluster? (normalized to [0,1])</td>
+    </tr>
+</table>
+
+<h3>4.3 Combined Reliability Score</h3>
+<div class="formula">
+    <var>r<sub>i</sub></var> = 0.30 &middot; &mu;<sub>i</sub> + 0.20 &middot; (1 - &sigma;<sub>i</sub>) + 0.15 &middot; (1 - H<sub>i</sub>) + 0.20 &middot; A<sub>i</sub> + 0.15 &middot; D<sub>i</sub>
+</div>
+
+<p><strong>Weight rationale:</strong></p>
+<ul>
+    <li><strong>&mu; (0.30):</strong> Strongest signal &mdash; if the model consistently says fraud, it likely is</li>
+    <li><strong>1-&sigma; (0.20):</strong> Stability across different contexts indicates robust classification</li>
+    <li><strong>A (0.20):</strong> Neighborhood consensus validates individual predictions</li>
+    <li><strong>1-H (0.15):</strong> Low entropy means the model isn't confused</li>
+    <li><strong>D (0.15):</strong> Dense regions are more likely to have consistent labels</li>
+</ul>
+
+<h3>4.4 Neighbors in Prediction-Behavior Space</h3>
+<p>Neighbors are defined by <strong>cosine similarity</strong> on the K-dimensional prediction vectors:</p>
+<div class="formula">
+    sim(<var>v<sub>i</sub></var>, <var>v<sub>j</sub></var>) = (<var>v<sub>i</sub></var> &middot; <var>v<sub>j</sub></var>) / (||<var>v<sub>i</sub></var>|| &middot; ||<var>v<sub>j</sub></var>||)
+</div>
+<p>Using k=15 nearest neighbors. This is computed via brute-force kNN on ~7,500 samples in 20 dimensions &mdash; essentially instant.</p>
+
+<h3>4.5 Classification Thresholds</h3>
+<table>
+    <tr><th>Category</th><th>Condition</th><th>Meaning</th></tr>
+    <tr><td><span class="tag">Reliable</span></td><td>r<sub>i</sub> &ge; threshold (default 0.55)</td><td>High confidence this is truly fraud</td></tr>
+    <tr><td><span class="tag">Uncertain</span></td><td>0.35 &le; r<sub>i</sub> &lt; threshold</td><td>Ambiguous &mdash; could be either class</td></tr>
+    <tr><td><span class="tag">Suspect</span></td><td>r<sub>i</sub> &lt; 0.35</td><td>Likely mislabeled (actually bogus)</td></tr>
+</table>
+
+<h3>4.6 Example: What Reliable vs Suspect Looks Like</h3>
+<div class="card">
+    <div class="card-title">Reliable fraud sample (r = 0.85)</div>
+<pre>Predictions across 20 sets: [0.92, 0.89, 0.94, 0.91, 0.88, 0.93, ...]
+mu = 0.91 (high)    sigma = 0.02 (low)    entropy = 0.12 (low)
+Neighbors: 14/15 also have mu > 0.5 (high agreement)
+--> Consistently, confidently classified as fraud from all angles</pre>
+</div>
+
+<div class="card">
+    <div class="card-title">Suspect sample (r = 0.32)</div>
+<pre>Predictions across 20 sets: [0.15, 0.82, 0.41, 0.73, 0.22, 0.68, ...]
+mu = 0.48 (borderline)    sigma = 0.25 (high)    entropy = 0.99 (high)
+Neighbors: 6/15 have mu > 0.5 (low agreement)
+--> Unstable, model is confused, likely mislabeled bogus</pre>
+</div>
+
+<!-- ==================== SECTION 5 ==================== -->
+<h2 id="support-set">5. Support Set Construction</h2>
+
+<h3>5.1 Composition (1000 total, balanced)</h3>
+<table>
+    <tr><th>Component</th><th>Count</th><th>Source</th><th>Selection Method</th></tr>
+    <tr><td>Positives (bogus)</td><td>500</td><td>All bogus-labeled (trusted)</td><td>K-Means diversity in feature space</td></tr>
+    <tr><td>Negatives (fraud)</td><td>500</td><td>Reliable fraud samples</td><td>Random sampling</td></tr>
+</table>
+
+<h3>5.2 Why Balanced?</h3>
+<p>Even though the data is 75/25 fraud/bogus, the support set is 50/50. This gives TabICL equal representation of both classes in its context window, preventing it from defaulting to the majority class.</p>
+
+<h3>5.3 Positive Selection: Feature-Space Diversity</h3>
+<p>For the 500 bogus samples, we want <em>representative coverage</em> of the bogus distribution:</p>
+<ol>
+    <li>Run KMeans(n_clusters=500) on all 2,500 bogus samples' features</li>
+    <li>From each cluster, select the sample closest to the centroid</li>
+</ol>
+<p>This ensures the support set covers the full bogus manifold rather than over-representing dense regions.</p>
+
+<h3>5.4 Negative Selection: Random from Reliable</h3>
+<p>For the 500 fraud samples, randomly sample from the reliable set (r<sub>i</sub> &ge; threshold).</p>
+
+<div class="insight">
+    <strong>Why random instead of diversity sampling?</strong> Random sampling naturally includes some near-boundary cases that teach TabICL where the decision surface is. KMeans diversity sampling selects "prototypical" fraud cases far from the boundary &mdash; easy examples that don't help discrimination.
+</div>
+
+<h3>5.5 Iteration: What Changes?</h3>
+<p>Across iterations, the <strong>reliability scores stay fixed</strong> (same random scoring sets). What changes:</p>
+<ul>
+    <li>Different random seed &rarr; different 500 random samples from the reliable pool</li>
+    <li>Each draw is evaluated on validation set</li>
+    <li>Best PR-AUC draw is kept</li>
+</ul>
+<p>This is essentially a random search over support set compositions within the reliable pool.</p>
+
+<!-- ==================== SECTION 6 ==================== -->
+<h2 id="lessons">6. Lessons Learned from Experiments</h2>
+
+<h3>6.1 Problem: Optimized Scoring Sets Degrade Performance</h3>
+<div class="card">
+    <div class="card-title">What happened</div>
+    <p>Original design: replace the 20 random scoring sets with optimized ones each iteration.</p>
+    <p><strong>Result:</strong> Iteration 2 always performed worse than iteration 1 (PR-AUC dropped 5-10%).</p>
+    <p><strong>Root cause:</strong> "Optimized" support sets (all built from reliable negatives) were too similar to each other. When you probe a sample with 20 near-identical contexts, all predictions agree &mdash; not because the sample is reliable, but because the probes lack diversity. This made every sample look "reliable," destroying signal.</p>
+</div>
+
+<h3>6.2 Problem: KMeans Diversity Selects Easy Negatives</h3>
+<div class="card">
+    <div class="card-title">What happened</div>
+    <p>KMeans centroids in prediction-behavior space are "prototypical" fraud cases &mdash; the most average, easy-to-classify examples. These are far from the decision boundary.</p>
+    <p><strong>Result:</strong> The support set taught TabICL about obvious fraud, not about the subtle boundary between fraud and bogus. Performance was worse than random.</p>
+    <p><strong>Fix:</strong> Random sampling from the reliable set naturally includes both easy and boundary cases.</p>
+</div>
+
+<h3>6.3 Problem: Default Threshold Too High</h3>
+<div class="card">
+    <div class="card-title">What happened</div>
+    <p>With threshold=0.75, iteration 1 found 0 reliable samples. The scoring components don't all max out &mdash; especially density and agreement, which depend on the data distribution.</p>
+    <p><strong>Fix:</strong> Lower to 0.55 (or use percentile-based thresholds instead of absolute values).</p>
+</div>
+
+<!-- ==================== SECTION 7 ==================== -->
+<h2 id="enhancements">7. Future Enhancements</h2>
+
+<h3>7.1 Adaptive Thresholds</h3>
+<p>Instead of fixed thresholds (0.55, 0.35), use percentile-based:</p>
+<div class="formula">
+    reliable = top 40% by score<br>
+    suspect = bottom 20% by score<br>
+    uncertain = middle 40%
+</div>
+<p>This adapts to the actual score distribution regardless of the data.</p>
+
+<h3>7.2 Option C: Weighted Random Sampling</h3>
+<p>Instead of uniform random from the reliable set, sample with probability proportional to reliability score:</p>
+<div class="formula">
+    P(select <var>x<sub>i</sub></var>) &prop; <var>r<sub>i</sub></var>
+</div>
+<p>Higher-reliability samples are more likely selected, but randomness ensures natural diversity. This is a soft version of thresholding.</p>
+
+<h3>7.3 Embedding-Space Neighbors</h3>
+<p>If TabICL exposes intermediate embeddings (e.g., via <code>kv_cache="repr"</code> mode), neighbors defined in embedding space would be more informative than prediction-behavior space. Embeddings capture semantic similarity beyond just classification output.</p>
+
+<h3>7.4 Dual-Neighborhood Scoring</h3>
+<p>Instead of one neighborhood, compute separate positive and negative neighborhoods:</p>
+<div class="formula">
+    score(<var>x</var>) = sim(<var>x</var>, N<sub>fraud</sub>) / sim(<var>x</var>, P<sub>bogus</sub>)
+</div>
+<p>A truly-fraud sample should be much more similar to other fraud samples than to bogus samples. This ratio is often more informative than absolute distance alone.</p>
+
+<h3>7.5 Feature-Space + Prediction-Space Hybrid Neighbors</h3>
+<p>Combine both feature-level and prediction-level similarity:</p>
+<div class="formula">
+    combined_sim = &alpha; &middot; sim<sub>feature</sub> + (1 - &alpha;) &middot; sim<sub>prediction</sub>
+</div>
+<p>This captures both "what the sample looks like" and "how the model treats it."</p>
+
+<h3>7.6 Conformal Prediction for Uncertainty</h3>
+<p>Use conformal prediction to produce calibrated uncertainty sets. If a fraud sample's conformal set contains both classes, it's uncertain. This provides distribution-free guarantees on the uncertainty estimates.</p>
+
+<h3>7.7 Iterative Refinement with Fresh Random Sets</h3>
+<p>Instead of reusing the same 20 scoring sets, generate <em>new</em> random sets each iteration (still random, not optimized). This provides different prediction vectors each round, and reliability scores can be averaged across iterations for stability:</p>
+<div class="formula">
+    <var>r<sub>i</sub></var><sup>(final)</sup> = mean(<var>r<sub>i</sub></var><sup>(1)</sup>, <var>r<sub>i</sub></var><sup>(2)</sup>, ..., <var>r<sub>i</sub></var><sup>(T)</sup>)
+</div>
+
+<h3>7.8 Active Learning Loop</h3>
+<p>Use suspect samples (likely mislabeled) as candidates for manual review. Each iteration:</p>
+<ol>
+    <li>Flag top-50 suspect samples for human review</li>
+    <li>Corrected labels enter the trusted positive pool</li>
+    <li>Rebuild support set with expanded reliable data</li>
+</ol>
+<p>This creates a human-in-the-loop system where each review cycle improves both label quality and model performance.</p>
+
+<h3>7.9 Multi-Objective Support Set Optimization</h3>
+<p>Optimize support set composition along multiple axes simultaneously:</p>
+<ul>
+    <li><strong>Label purity:</strong> Minimize probability of including mislabeled samples</li>
+    <li><strong>Feature coverage:</strong> Maximize representation of the data manifold</li>
+    <li><strong>Boundary information:</strong> Include informative near-boundary examples</li>
+    <li><strong>Class calibration:</strong> Ensure predicted probabilities are well-calibrated</li>
+</ul>
+
+<h3>7.10 Scaling to Large Datasets</h3>
+<p>For datasets with 100K+ samples:</p>
+<ul>
+    <li>Increase K (support sets for scoring) to 50-100 for more stable prediction vectors</li>
+    <li>Use approximate nearest neighbors (FAISS) instead of brute-force kNN</li>
+    <li>Distributed multi-server inference with sharded query data</li>
+    <li>Progressive filtering: first pass with K=5 to eliminate obvious suspects, then K=20 for the rest</li>
+</ul>
+
+<!-- ==================== FOOTER ==================== -->
+<div style="margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: #6b7280; font-size: 0.85rem;">
+    <p>Algorithm design and implementation: Confidence-Aware Support Set Selection for In-Context Tabular Learning under Asymmetric Label Uncertainty</p>
+    <p>Last updated: July 2026</p>
+</div>
+
+</body>
+</html>

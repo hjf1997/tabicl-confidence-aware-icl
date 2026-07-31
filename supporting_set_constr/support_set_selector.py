@@ -49,64 +49,57 @@ class SupportSetSelector:
         neg_reliability_scores: np.ndarray,
         neg_prediction_vectors: np.ndarray,
         neg_classification: dict,
+        n_neg_override: int = None,
         random_state: int = 42,
     ) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-        """Build a single optimized support set (1000 total, balanced 500/500).
+        """Build optimized support set using all positives + matched negatives.
+
+        Negative sampling strategies:
+            - random: random sample from reliable pool
+            - kmeans: KMeans centroids in prediction space (representative)
+            - boundary: hard examples near decision boundary
+            - hybrid: mixture of representative + random + hard + boundary
 
         Returns:
             ((X_support, y_support), (pos_indices, neg_indices))
         """
-        target = self.config.target_size
-        n_pos = int(target * self.config.positive_ratio)
-        n_neg_reliable = int(target * self.config.negative_reliable_ratio)
-        n_neg_boundary = target - n_pos - n_neg_reliable
+        # Use ALL positive samples
+        pos_selected_idx = np.arange(len(X_positives))
+        X_pos_sel = X_positives
+        y_pos_sel = y_positives
 
-        # Select positives via feature-space k-means diversity
-        pos_selected_idx = self._diversity_sample_features(X_positives, n_pos, random_state)
-        X_pos_sel = X_positives[pos_selected_idx]
-        y_pos_sel = y_positives[pos_selected_idx]
+        # Number of negatives = number of positives (balanced)
+        n_neg_total = n_neg_override if n_neg_override is not None else len(X_positives)
 
-        # Select negatives based on strategy
-        n_neg_total = n_neg_reliable + n_neg_boundary
+        # Build candidate pool: reliable + uncertain (exclude suspect)
         reliable_mask = neg_classification["reliable"]
         uncertain_mask = neg_classification["uncertain"]
+        candidate_mask = reliable_mask | uncertain_mask
+        candidate_idx = np.where(candidate_mask)[0]
+        candidate_scores = neg_reliability_scores[candidate_mask]
+        candidate_pred_vectors = neg_prediction_vectors[candidate_mask]
+
         rng = np.random.default_rng(random_state)
 
         if self.neg_sampling_strategy == "random":
-            # Random sampling from reliable negatives (Option B)
-            reliable_idx = np.where(reliable_mask)[0]
-            if len(reliable_idx) >= n_neg_total:
-                all_neg_idx = rng.choice(reliable_idx, size=n_neg_total, replace=False)
-            else:
-                # Use all reliable + random from uncertain
-                uncertain_idx = np.where(uncertain_mask)[0]
-                n_extra = n_neg_total - len(reliable_idx)
-                extra_idx = rng.choice(uncertain_idx, size=min(n_extra, len(uncertain_idx)), replace=False)
-                all_neg_idx = np.concatenate([reliable_idx, extra_idx])
+            all_neg_idx = self._neg_sample_random(
+                candidate_idx, candidate_scores, n_neg_total, rng
+            )
+        elif self.neg_sampling_strategy == "kmeans":
+            all_neg_idx = self._neg_sample_kmeans(
+                candidate_idx, candidate_pred_vectors, n_neg_total, random_state
+            )
+        elif self.neg_sampling_strategy == "boundary":
+            all_neg_idx = self._neg_sample_boundary(
+                candidate_idx, candidate_pred_vectors, candidate_scores, n_neg_total, rng
+            )
+        elif self.neg_sampling_strategy == "hybrid":
+            all_neg_idx = self._neg_sample_hybrid(
+                candidate_idx, candidate_pred_vectors, candidate_scores, n_neg_total, random_state, rng
+            )
         else:
-            # Original diversity strategy
-            if reliable_mask.sum() < n_neg_reliable:
-                n_from_reliable = int(reliable_mask.sum())
-                n_extra = n_neg_reliable - n_from_reliable
-                reliable_idx = np.where(reliable_mask)[0]
-                uncertain_idx = np.where(uncertain_mask)[0]
-                extra_idx = rng.choice(uncertain_idx, size=min(n_extra, len(uncertain_idx)), replace=False)
-                neg_reliable_idx = np.concatenate([reliable_idx, extra_idx])
-            else:
-                neg_reliable_selected = self._diversity_sample_prediction_space(
-                    neg_prediction_vectors[reliable_mask], n_neg_reliable, random_state
-                )
-                neg_reliable_idx = np.where(reliable_mask)[0][neg_reliable_selected]
+            raise ValueError(f"Unknown neg_sampling_strategy: {self.neg_sampling_strategy}")
 
-            if uncertain_mask.sum() > 0:
-                neg_boundary_idx = self._boundary_sample(
-                    neg_reliability_scores[uncertain_mask], n_neg_boundary
-                )
-                neg_boundary_idx = np.where(uncertain_mask)[0][neg_boundary_idx]
-            else:
-                neg_boundary_idx = np.array([], dtype=int)
-
-            all_neg_idx = np.concatenate([neg_reliable_idx, neg_boundary_idx])
         X_neg_sel = X_negatives[all_neg_idx]
         y_neg_sel = y_negatives[all_neg_idx]
 
@@ -114,6 +107,97 @@ class SupportSetSelector:
         y_support = np.concatenate([y_pos_sel, y_neg_sel])
 
         return (X_support, y_support), (pos_selected_idx, all_neg_idx)
+
+    def _neg_sample_random(self, candidate_idx, candidate_scores, n, rng):
+        """Random sampling from candidate pool (preserves natural distribution)."""
+        if len(candidate_idx) <= n:
+            return candidate_idx.copy()
+        selected = rng.choice(len(candidate_idx), size=n, replace=False)
+        return candidate_idx[selected]
+
+    def _neg_sample_kmeans(self, candidate_idx, candidate_pred_vectors, n, random_state):
+        """KMeans centroids in prediction space (representative sampling)."""
+        if len(candidate_idx) <= n:
+            return candidate_idx.copy()
+        selected_local = self._diversity_sample_prediction_space(
+            candidate_pred_vectors, n, random_state
+        )
+        return candidate_idx[selected_local]
+
+    def _neg_sample_boundary(self, candidate_idx, candidate_pred_vectors, candidate_scores, n, rng):
+        """Hard-example sampling: samples near the decision boundary.
+
+        Uses two signals:
+        - High mean prediction (fraud samples that look like bogus)
+        - High prediction variance (unstable classification across support sets)
+        Combines them into a boundary score and selects top-n.
+        """
+        if len(candidate_idx) <= n:
+            return candidate_idx.copy()
+
+        mean_pred = candidate_pred_vectors.mean(axis=1)
+        variance_pred = candidate_pred_vectors.var(axis=1)
+
+        mean_pred_norm = (mean_pred - mean_pred.min()) / (mean_pred.max() - mean_pred.min() + 1e-10)
+        variance_norm = (variance_pred - variance_pred.min()) / (variance_pred.max() - variance_pred.min() + 1e-10)
+
+        boundary_score = 0.6 * mean_pred_norm + 0.4 * variance_norm
+        top_indices = np.argsort(boundary_score)[-n:]
+        return candidate_idx[top_indices]
+
+    def _neg_sample_hybrid(self, candidate_idx, candidate_pred_vectors, candidate_scores, n, random_state, rng):
+        """Hybrid mixture: representative (40%) + random (20%) + hard (20%) + boundary (20%).
+
+        - Representative: KMeans centroids — clear examples of fraud structure
+        - Random: preserves natural distribution
+        - Hard: highest mean prediction (fraud that looks like bogus)
+        - Boundary: highest prediction variance (unstable across support sets)
+        """
+        if len(candidate_idx) <= n:
+            return candidate_idx.copy()
+
+        n_representative = int(n * 0.4)
+        n_random = int(n * 0.2)
+        n_hard = int(n * 0.2)
+        n_boundary = n - n_representative - n_random - n_hard
+
+        selected_set = set()
+
+        # Representative: KMeans centroids
+        repr_local = self._diversity_sample_prediction_space(
+            candidate_pred_vectors, n_representative, random_state
+        )
+        for i in repr_local:
+            selected_set.add(int(i))
+
+        # Hard: highest mean prediction (fraud looking like bogus)
+        mean_pred = candidate_pred_vectors.mean(axis=1)
+        hard_order = np.argsort(mean_pred)[::-1]
+        for i in hard_order:
+            if len(selected_set) >= n_representative + n_hard:
+                break
+            if int(i) not in selected_set:
+                selected_set.add(int(i))
+
+        # Boundary: highest prediction variance
+        variance_pred = candidate_pred_vectors.var(axis=1)
+        boundary_order = np.argsort(variance_pred)[::-1]
+        for i in boundary_order:
+            if len(selected_set) >= n_representative + n_hard + n_boundary:
+                break
+            if int(i) not in selected_set:
+                selected_set.add(int(i))
+
+        # Random: fill remaining from unselected candidates
+        remaining_pool = [i for i in range(len(candidate_idx)) if i not in selected_set]
+        n_remaining = n - len(selected_set)
+        if n_remaining > 0 and len(remaining_pool) > 0:
+            random_selected = rng.choice(remaining_pool, size=min(n_remaining, len(remaining_pool)), replace=False)
+            for i in random_selected:
+                selected_set.add(int(i))
+
+        selected_local = np.array(sorted(selected_set))
+        return candidate_idx[selected_local]
 
     def build_K_optimized_support_sets(
         self,

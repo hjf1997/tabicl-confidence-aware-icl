@@ -4,3 +4,4 @@ __pycache__/
 output/
 *.npy
 .DS_Store
+.vscode/

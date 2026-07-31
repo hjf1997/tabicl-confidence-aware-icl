@@ -109,7 +109,11 @@ class ConfidenceAwarePipeline:
             df_scores.to_csv(output_dir / f"reliability_scores_iter{iteration + 1}.csv", index=False)
 
             # Stage D: build optimized support set
-            logger.info("Stage D: Building optimized support set (size=%d)", config.support_set.target_size)
+            # Use ALL positive samples; select same number of negatives
+            n_pos_all = len(X_pos_np)
+            n_neg_target = n_pos_all
+            logger.info("Stage D: Building optimized support set (all %d pos + %d neg = %d total)",
+                        n_pos_all, n_neg_target, n_pos_all + n_neg_target)
             optimized_support, selected_indices = self.selector.build_optimized_support_set(
                 X_positives=X_pos_np,
                 y_positives=y_pos_np,
@@ -118,6 +122,7 @@ class ConfidenceAwarePipeline:
                 neg_reliability_scores=reliability_scores,
                 neg_prediction_vectors=self.scorer.prediction_vectors_,
                 neg_classification=classification,
+                n_neg_override=n_neg_target,
                 random_state=42 + iteration,
             )
 
@@ -220,7 +225,7 @@ class ConfidenceAwarePipeline:
             "pipeline": {
                 "K": config.reliability.K,
                 "support_set_size_initial": config.reliability.support_set_size,
-                "target_support_set_size": config.support_set.target_size,
+                "support_set_composition": "all_positives + matched_negatives",
                 "max_iterations": config.max_iterations,
                 "convergence_threshold": config.convergence_threshold,
                 "eval_metric": config.eval_metric,
@@ -239,9 +244,10 @@ class ConfidenceAwarePipeline:
                 "uncertain_threshold": config.reliability.uncertain_threshold,
             },
             "support_set_composition": {
-                "positive_ratio": config.support_set.positive_ratio,
-                "negative_reliable_ratio": config.support_set.negative_reliable_ratio,
-                "negative_boundary_ratio": config.support_set.negative_boundary_ratio,
+                "strategy": "all_positives_balanced",
+                "neg_sampling_strategy": config.support_set.neg_sampling_strategy,
+                "n_positives": int(len(y_pos)),
+                "n_negatives": int(len(y_pos)),
             },
         }
         with open(output_dir / "artifact_manifest.json", "w") as f:
@@ -265,4 +271,10 @@ class ConfidenceAwarePipeline:
             X_support, y_support, X_test,
             desc="Final test evaluation",
         )
-        return self.evaluator.compute_all(y_test, test_proba)
+        metrics = self.evaluator.compute_all(y_test, test_proba)
+
+        df_test_metrics = pd.DataFrame([metrics])
+        df_test_metrics.to_csv(output_dir / "test_metrics.csv", index=False)
+        logger.info("Test metrics saved to %s", output_dir / "test_metrics.csv")
+
+        return metrics

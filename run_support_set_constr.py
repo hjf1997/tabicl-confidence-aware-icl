@@ -20,21 +20,16 @@ def main():
     parser.add_argument("--top-features", type=int, default=150, help="Number of top SHAP features to use")
     parser.add_argument("--K", type=int, default=20, help="Number of diverse support sets")
     parser.add_argument("--support-size", type=int, default=500, help="Initial support set size per set")
-    parser.add_argument("--target-size", type=int, default=1000, help="Optimized support set size")
-    parser.add_argument("--max-iterations", type=int, default=5, help="Max EM iterations")
+    parser.add_argument("--max-iterations", type=int, default=1, help="Max iterations (default 1, no iterative refinement)")
     parser.add_argument("--reliable-threshold", type=float, default=0.75, help="Reliability score threshold for reliable negatives")
     parser.add_argument("--uncertain-threshold", type=float, default=0.45, help="Reliability score threshold for uncertain vs suspect")
-    parser.add_argument("--neg-sampling", type=str, default="random", choices=["random", "diversity"], help="Negative sampling strategy: random from reliable set, or diversity via k-means")
+    parser.add_argument("--neg-sampling", type=str, default="random", choices=["random", "kmeans", "boundary", "hybrid"], help="Negative sampling strategy: random, kmeans (representative), boundary (hard examples), hybrid (mixture)")
     parser.add_argument("--eval-test", action="store_true", help="Run final evaluation on test set after pipeline converges")
-    parser.add_argument("--exp-tag", type=str, default=None, help="Custom experiment tag (default: auto-generated timestamp)")
     args = parser.parse_args()
 
-    # Generate experiment output directory: exp/YYYYMMDD_HHMM_support_set_constr/
-    if args.exp_tag:
-        exp_name = args.exp_tag
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        exp_name = f"{timestamp}_support_set_constr_{args.setting}"
+    # Generate experiment output directory: exp/YYYYMMDD_HHMM_support_set_constr_settingX/
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    exp_name = f"{timestamp}_support_set_constr_{args.setting}"
     output_dir = PROJECT_ROOT / "exp" / exp_name
 
     logging.basicConfig(
@@ -60,7 +55,6 @@ def main():
     config.reliability.support_set_size = args.support_size
     config.reliability.reliable_threshold = args.reliable_threshold
     config.reliability.uncertain_threshold = args.uncertain_threshold
-    config.support_set.target_size = args.target_size
     config.support_set.neg_sampling_strategy = args.neg_sampling
 
     logging.info("Experiment output: %s", output_dir)
