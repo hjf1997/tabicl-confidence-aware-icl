@@ -11,9 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "supporting_set_constr"
 
 import torch.multiprocessing as mp
 
-from config import DataConfig, TabICLConfig, MultiGPUConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH, FEATURE_IMPORTANCE_PATH
+from config import DataConfig, TabICLConfig, MultiGPUConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH
 from data_loader import DataLoader
-from support_set_selector import SupportSetSelector
 from multi_gpu_inference import MultiGPUInference, estimate_max_query_chunk
 from evaluate import Evaluator
 
@@ -105,6 +104,16 @@ def main():
 
     all_val_metrics = []
     all_test_metrics = []
+    best_val_pr_auc = 0.0
+    best_support_data = None
+
+    # Determine positive indices for id tracking
+    pos_mask_idx = np.where(pos_mask)[0]
+    neg_mask_idx = np.where(neg_mask)[0]
+    if len(X_pos) <= n_pos_target:
+        pos_selected_global = pos_mask_idx
+    else:
+        pos_selected_global = pos_mask_idx[pos_selected]
 
     for run in range(args.n_runs):
         rng = np.random.default_rng(args.seed + run)
@@ -132,6 +141,25 @@ def main():
         test_metrics["run"] = run + 1
         all_test_metrics.append(test_metrics)
         logging.info("  Test: %s", test_metrics)
+
+        # Track best run by val PR-AUC
+        if val_metrics["pr_auc"] > best_val_pr_auc:
+            best_val_pr_auc = val_metrics["pr_auc"]
+            neg_selected_global = neg_mask_idx[neg_idx]
+            support_ids = pd.concat([
+                ids_train.iloc[pos_selected_global].reset_index(drop=True),
+                ids_train.iloc[neg_selected_global].reset_index(drop=True),
+            ], ignore_index=True)
+            best_support_data = (X_support, y_support, support_ids)
+
+    # Save best support set as CSV
+    if best_support_data is not None:
+        X_best, y_best, ids_best = best_support_data
+        df_support = pd.DataFrame(X_best, columns=feature_columns)
+        df_support.insert(0, data_config.id_col, ids_best.values)
+        df_support[data_config.label_col] = y_best
+        df_support.to_csv(output_dir / "best_support_set.csv", index=False)
+        logging.info("Best support set saved to %s", output_dir / "best_support_set.csv")
 
     # Save results
     df_val = pd.DataFrame(all_val_metrics)
