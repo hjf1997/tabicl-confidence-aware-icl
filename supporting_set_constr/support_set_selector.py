@@ -117,24 +117,26 @@ class SupportSetSelector:
         return (X_support, y_support), (pos_selected_idx, all_neg_idx)
 
     def _neg_sample_informed(self, candidate_idx, candidate_pred_vectors, candidate_scores, n):
-        """Informativeness-weighted sampling: balances reliability with prediction variance.
+        """Informativeness-weighted sampling: reliability as foundation, variance as bonus.
 
-        I(x_i) = alpha * variance_norm + (1 - alpha) * reliability_norm
+        S(x_i) = R(x_i) * (1 + alpha * var_norm)
 
-        High variance = model's decision depends on context (informative for ICL)
-        High reliability = label is likely correct (avoids noise)
-        The combination selects reliable boundary cases.
+        Reliability provides the foundation; prediction disagreement provides a bonus.
+        Unreliable samples are penalized regardless of variance.
+        Percentile normalization (5th/95th) for robustness against outliers.
         """
         if len(candidate_idx) <= n:
             return candidate_idx.copy()
 
-        alpha = 0.5
+        alpha = 0.25
         variance = candidate_pred_vectors.var(axis=1)
-        var_norm = (variance - variance.min()) / (variance.max() - variance.min() + 1e-10)
-        rel_norm = (candidate_scores - candidate_scores.min()) / (candidate_scores.max() - candidate_scores.min() + 1e-10)
 
-        informativeness = alpha * var_norm + (1 - alpha) * rel_norm
-        top_indices = np.argsort(informativeness)[-n:]
+        q05 = np.percentile(variance, 5)
+        q95 = np.percentile(variance, 95)
+        var_norm = np.clip((variance - q05) / (q95 - q05 + 1e-8), 0, 1)
+
+        score = candidate_scores * (1 + alpha * var_norm)
+        top_indices = np.argsort(score)[-n:]
         return candidate_idx[top_indices]
 
     def _neg_sample_reliable(self, candidate_idx, candidate_scores, n):
