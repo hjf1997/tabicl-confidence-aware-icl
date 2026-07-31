@@ -97,6 +97,10 @@ class SupportSetSelector:
             all_neg_idx = self._neg_sample_hybrid(
                 candidate_idx, candidate_pred_vectors, candidate_scores, n_neg_total, random_state, rng
             )
+        elif self.neg_sampling_strategy == "reliable":
+            all_neg_idx = self._neg_sample_reliable(
+                candidate_idx, candidate_scores, n_neg_total
+            )
         else:
             raise ValueError(f"Unknown neg_sampling_strategy: {self.neg_sampling_strategy}")
 
@@ -107,6 +111,13 @@ class SupportSetSelector:
         y_support = np.concatenate([y_pos_sel, y_neg_sel])
 
         return (X_support, y_support), (pos_selected_idx, all_neg_idx)
+
+    def _neg_sample_reliable(self, candidate_idx, candidate_scores, n):
+        """Top-n samples with highest reliability scores."""
+        if len(candidate_idx) <= n:
+            return candidate_idx.copy()
+        top_indices = np.argsort(candidate_scores)[-n:]
+        return candidate_idx[top_indices]
 
     def _neg_sample_random(self, candidate_idx, candidate_scores, n, rng):
         """Random sampling from candidate pool (preserves natural distribution)."""

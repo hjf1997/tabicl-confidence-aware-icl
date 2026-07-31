@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--uncertain-threshold", type=float, default=0.45, help="(fixed method) Reliability score threshold for uncertain vs suspect")
     parser.add_argument("--reliable-percentile", type=float, default=30.0, help="(percentile method) Top X%% classified as reliable")
     parser.add_argument("--suspect-percentile", type=float, default=30.0, help="(percentile method) Bottom X%% classified as suspect")
-    parser.add_argument("--neg-sampling", type=str, default="random", choices=["random", "kmeans", "boundary", "hybrid"], help="Negative sampling strategy: random, kmeans (representative), boundary (hard examples), hybrid (mixture)")
+    parser.add_argument("--neg-sampling", type=str, default="random", choices=["random", "reliable", "kmeans", "boundary", "hybrid"], help="Negative sampling strategy: random, reliable (top-n scores), kmeans (representative), boundary (hard examples), hybrid (mixture)")
     parser.add_argument("--eval-test", action="store_true", help="Run final evaluation on test set after pipeline converges")
     args = parser.parse_args()
 
