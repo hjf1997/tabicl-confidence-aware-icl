@@ -96,9 +96,29 @@ class ReliabilityScorer:
         return density
 
     def classify_samples(self, scores: np.ndarray) -> Dict[str, np.ndarray]:
-        """Partition fraud samples into reliable, uncertain, and suspect (boolean masks)."""
+        """Partition fraud samples into reliable, uncertain, and suspect (boolean masks).
+
+        If threshold_method is "percentile", thresholds are derived from the score
+        distribution (top reliable_percentile% = reliable, bottom suspect_percentile% = suspect).
+        Otherwise uses fixed thresholds from config.
+        """
+        if self.config.threshold_method == "percentile":
+            reliable_thresh = np.percentile(scores, 100 - self.config.reliable_percentile)
+            suspect_thresh = np.percentile(scores, self.config.suspect_percentile)
+            self.resolved_thresholds_ = {
+                "reliable_threshold": float(reliable_thresh),
+                "uncertain_threshold": float(suspect_thresh),
+            }
+        else:
+            reliable_thresh = self.config.reliable_threshold
+            suspect_thresh = self.config.uncertain_threshold
+            self.resolved_thresholds_ = {
+                "reliable_threshold": float(reliable_thresh),
+                "uncertain_threshold": float(suspect_thresh),
+            }
+
         return {
-            "reliable": scores >= self.config.reliable_threshold,
-            "uncertain": (scores >= self.config.uncertain_threshold) & (scores < self.config.reliable_threshold),
-            "suspect": scores < self.config.uncertain_threshold,
+            "reliable": scores >= reliable_thresh,
+            "uncertain": (scores >= suspect_thresh) & (scores < reliable_thresh),
+            "suspect": scores < suspect_thresh,
         }

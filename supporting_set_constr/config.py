@@ -64,8 +64,11 @@ class ReliabilityConfig:
     w_density: float = 0.15
     n_neighbors: int = 15
     similarity_metric: str = "cosine"
-    reliable_threshold: float = 0.75
-    uncertain_threshold: float = 0.45
+    threshold_method: str = "percentile"  # "fixed" or "percentile"
+    reliable_threshold: float = 0.75  # used when threshold_method="fixed"
+    uncertain_threshold: float = 0.45  # used when threshold_method="fixed"
+    reliable_percentile: float = 30.0  # top X% classified as reliable
+    suspect_percentile: float = 30.0  # bottom X% classified as suspect
 
 
 @dataclass

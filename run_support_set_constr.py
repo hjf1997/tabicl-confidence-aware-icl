@@ -21,8 +21,11 @@ def main():
     parser.add_argument("--K", type=int, default=20, help="Number of diverse support sets")
     parser.add_argument("--support-size", type=int, default=500, help="Initial support set size per set")
     parser.add_argument("--max-iterations", type=int, default=1, help="Max iterations (default 1, no iterative refinement)")
-    parser.add_argument("--reliable-threshold", type=float, default=0.75, help="Reliability score threshold for reliable negatives")
-    parser.add_argument("--uncertain-threshold", type=float, default=0.45, help="Reliability score threshold for uncertain vs suspect")
+    parser.add_argument("--threshold-method", type=str, default="percentile", choices=["fixed", "percentile"], help="Threshold method: fixed (manual thresholds) or percentile (adaptive)")
+    parser.add_argument("--reliable-threshold", type=float, default=0.75, help="(fixed method) Reliability score threshold for reliable negatives")
+    parser.add_argument("--uncertain-threshold", type=float, default=0.45, help="(fixed method) Reliability score threshold for uncertain vs suspect")
+    parser.add_argument("--reliable-percentile", type=float, default=30.0, help="(percentile method) Top X%% classified as reliable")
+    parser.add_argument("--suspect-percentile", type=float, default=30.0, help="(percentile method) Bottom X%% classified as suspect")
     parser.add_argument("--neg-sampling", type=str, default="random", choices=["random", "kmeans", "boundary", "hybrid"], help="Negative sampling strategy: random, kmeans (representative), boundary (hard examples), hybrid (mixture)")
     parser.add_argument("--eval-test", action="store_true", help="Run final evaluation on test set after pipeline converges")
     args = parser.parse_args()
@@ -53,8 +56,11 @@ def main():
     )
     config.reliability.K = args.K
     config.reliability.support_set_size = args.support_size
+    config.reliability.threshold_method = args.threshold_method
     config.reliability.reliable_threshold = args.reliable_threshold
     config.reliability.uncertain_threshold = args.uncertain_threshold
+    config.reliability.reliable_percentile = args.reliable_percentile
+    config.reliability.suspect_percentile = args.suspect_percentile
     config.support_set.neg_sampling_strategy = args.neg_sampling
 
     logging.info("Experiment output: %s", output_dir)

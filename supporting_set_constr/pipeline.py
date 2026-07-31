@@ -86,10 +86,12 @@ class ConfidenceAwarePipeline:
 
             # Stage C: classify fraud samples
             classification = self.scorer.classify_samples(reliability_scores)
+            resolved = self.scorer.resolved_thresholds_
             n_reliable = int(classification["reliable"].sum())
             n_uncertain = int(classification["uncertain"].sum())
             n_suspect = int(classification["suspect"].sum())
-            logger.info("Stage C: Reliable=%d, Uncertain=%d, Suspect=%d",
+            logger.info("Stage C: Thresholds (reliable=%.4f, suspect=%.4f) → Reliable=%d, Uncertain=%d, Suspect=%d",
+                        resolved["reliable_threshold"], resolved["uncertain_threshold"],
                         n_reliable, n_uncertain, n_suspect)
 
             # Save reliability scores with ar_case_no
@@ -240,8 +242,13 @@ class ConfidenceAwarePipeline:
                 "w_density": config.reliability.w_density,
                 "n_neighbors": config.reliability.n_neighbors,
                 "similarity_metric": config.reliability.similarity_metric,
-                "reliable_threshold": config.reliability.reliable_threshold,
-                "uncertain_threshold": config.reliability.uncertain_threshold,
+                "threshold_method": config.reliability.threshold_method,
+                "reliable_threshold_config": config.reliability.reliable_threshold,
+                "uncertain_threshold_config": config.reliability.uncertain_threshold,
+                "reliable_percentile": config.reliability.reliable_percentile,
+                "suspect_percentile": config.reliability.suspect_percentile,
+                "resolved_reliable_threshold": self.scorer.resolved_thresholds_["reliable_threshold"],
+                "resolved_uncertain_threshold": self.scorer.resolved_thresholds_["uncertain_threshold"],
             },
             "support_set_composition": {
                 "strategy": "all_positives_balanced",
