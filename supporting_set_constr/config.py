@@ -73,6 +73,7 @@ class ReliabilityConfig:
 
 @dataclass
 class SupportSetConfig:
+    target_size: int = None  # None = use all positives + equal negatives
     neg_sampling_strategy: str = "random"
 
 

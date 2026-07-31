@@ -111,11 +111,16 @@ class ConfidenceAwarePipeline:
             df_scores.to_csv(output_dir / f"reliability_scores_iter{iteration + 1}.csv", index=False)
 
             # Stage D: build optimized support set
-            # Use ALL positive samples; select same number of negatives
-            n_pos_all = len(X_pos_np)
-            n_neg_target = n_pos_all
-            logger.info("Stage D: Building optimized support set (all %d pos + %d neg = %d total)",
-                        n_pos_all, n_neg_target, n_pos_all + n_neg_target)
+            target_size = config.support_set.target_size
+            if target_size is not None:
+                n_half = target_size // 2
+                n_pos_target = min(n_half, len(X_pos_np))
+                n_neg_target = n_half
+            else:
+                n_pos_target = len(X_pos_np)
+                n_neg_target = len(X_pos_np)
+            logger.info("Stage D: Building optimized support set (%d pos + %d neg = %d total)",
+                        n_pos_target, n_neg_target, n_pos_target + n_neg_target)
             optimized_support, selected_indices = self.selector.build_optimized_support_set(
                 X_positives=X_pos_np,
                 y_positives=y_pos_np,
@@ -251,10 +256,10 @@ class ConfidenceAwarePipeline:
                 "resolved_uncertain_threshold": self.scorer.resolved_thresholds_["uncertain_threshold"],
             },
             "support_set_composition": {
-                "strategy": "all_positives_balanced",
+                "target_size": config.support_set.target_size,
                 "neg_sampling_strategy": config.support_set.neg_sampling_strategy,
-                "n_positives": int(len(y_pos)),
-                "n_negatives": int(len(y_pos)),
+                "n_positives": int((best_support_set[1] == config.data.positive_class).sum()) if best_support_set else 0,
+                "n_negatives": int((best_support_set[1] == config.data.negative_class).sum()) if best_support_set else 0,
             },
         }
         with open(output_dir / "artifact_manifest.json", "w") as f:

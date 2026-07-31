@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--top-features", type=int, default=150, help="Number of top SHAP features to use")
     parser.add_argument("--K", type=int, default=20, help="Number of diverse support sets")
     parser.add_argument("--support-size", type=int, default=500, help="Initial support set size per set")
+    parser.add_argument("--target-size", type=int, default=None, help="Final support set size (n/2 pos + n/2 neg). If not set, uses all positives + equal negatives")
     parser.add_argument("--max-iterations", type=int, default=1, help="Max iterations (default 1, no iterative refinement)")
     parser.add_argument("--threshold-method", type=str, default="percentile", choices=["fixed", "percentile"], help="Threshold method: fixed (manual thresholds) or percentile (adaptive)")
     parser.add_argument("--reliable-threshold", type=float, default=0.75, help="(fixed method) Reliability score threshold for reliable negatives")
@@ -61,6 +62,7 @@ def main():
     config.reliability.uncertain_threshold = args.uncertain_threshold
     config.reliability.reliable_percentile = args.reliable_percentile
     config.reliability.suspect_percentile = args.suspect_percentile
+    config.support_set.target_size = args.target_size
     config.support_set.neg_sampling_strategy = args.neg_sampling
 
     logging.info("Experiment output: %s", output_dir)

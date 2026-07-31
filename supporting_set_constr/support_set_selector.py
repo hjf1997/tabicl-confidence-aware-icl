@@ -52,24 +52,33 @@ class SupportSetSelector:
         n_neg_override: int = None,
         random_state: int = 42,
     ) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-        """Build optimized support set using all positives + matched negatives.
+        """Build optimized support set.
+
+        If n_neg_override is provided, it determines n_pos and n_neg (both = n_neg_override).
+        When n_positives > n_pos, selects diverse positives via feature-space KMeans.
+        When n_positives <= n_pos, uses all positives.
 
         Negative sampling strategies:
             - random: random sample from reliable pool
             - kmeans: KMeans centroids in prediction space (representative)
             - boundary: hard examples near decision boundary
             - hybrid: mixture of representative + random + hard + boundary
+            - reliable: top-n by reliability score
+            - informed: reliability * (1 + alpha * var_norm)
 
         Returns:
             ((X_support, y_support), (pos_indices, neg_indices))
         """
-        # Use ALL positive samples
-        pos_selected_idx = np.arange(len(X_positives))
-        X_pos_sel = X_positives
-        y_pos_sel = y_positives
+        n_pos = n_neg_override if n_neg_override is not None else len(X_positives)
+        n_neg_total = n_pos
 
-        # Number of negatives = number of positives (balanced)
-        n_neg_total = n_neg_override if n_neg_override is not None else len(X_positives)
+        # Select positives
+        if len(X_positives) <= n_pos:
+            pos_selected_idx = np.arange(len(X_positives))
+        else:
+            pos_selected_idx = self._diversity_sample_features(X_positives, n_pos, random_state)
+        X_pos_sel = X_positives[pos_selected_idx]
+        y_pos_sel = y_positives[pos_selected_idx]
 
         # Build candidate pool: reliable + uncertain (exclude suspect)
         reliable_mask = neg_classification["reliable"]
