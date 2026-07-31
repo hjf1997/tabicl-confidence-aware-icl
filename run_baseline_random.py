@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 
 from config import DataConfig, TabICLConfig, MultiGPUConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH, FEATURE_IMPORTANCE_PATH
 from data_loader import DataLoader
+from support_set_selector import SupportSetSelector
 from multi_gpu_inference import MultiGPUInference, estimate_max_query_chunk
 from evaluate import Evaluator
 
@@ -23,6 +24,7 @@ def main():
     parser.add_argument("--model-path", type=str, default=str(DEFAULT_MODEL_PATH), help="Local TabICL checkpoint path")
     parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
     parser.add_argument("--top-features", type=int, default=150, help="Number of top SHAP features to use")
+    parser.add_argument("--target-size", type=int, default=None, help="Final support set size (n/2 pos + n/2 neg). If not set, uses all positives + equal negatives")
     parser.add_argument("--n-runs", type=int, default=5, help="Number of random runs to average over")
     parser.add_argument("--seed", type=int, default=42, help="Base random seed")
     args = parser.parse_args()
@@ -65,12 +67,38 @@ def main():
     y_neg = y_train[neg_mask]
     ids_neg = ids_train[neg_mask]
 
-    n_pos = len(X_pos)
-    n_neg_sample = n_pos
+    # Determine support set sizes
+    if args.target_size is not None:
+        n_pos_target = args.target_size // 2
+        n_neg_sample = args.target_size // 2
+    else:
+        n_pos_target = len(X_pos)
+        n_neg_sample = len(X_pos)
+
+    # Select positives (diversity sampling if needed)
+    if len(X_pos) <= n_pos_target:
+        X_pos_sel = X_pos
+        y_pos_sel = y_pos
+    else:
+        from sklearn.cluster import KMeans
+        km = KMeans(n_clusters=n_pos_target, random_state=42, n_init=3)
+        X_pos_float = np.asarray(X_pos, dtype=np.float64)
+        km.fit(X_pos_float)
+        pos_selected = []
+        for c in range(n_pos_target):
+            cluster_indices = np.where(km.labels_ == c)[0]
+            if len(cluster_indices) == 0:
+                continue
+            dists = np.linalg.norm(X_pos_float[cluster_indices] - km.cluster_centers_[c], axis=1)
+            pos_selected.append(cluster_indices[np.argmin(dists)])
+        pos_selected = np.array(pos_selected)
+        X_pos_sel = X_pos[pos_selected]
+        y_pos_sel = y_pos[pos_selected]
 
     logging.info("Data: train=%d (pos=%d, neg=%d), val=%d, test=%d, features=%d",
-                 len(y_train), n_pos, len(X_neg), len(y_val), len(y_test), len(feature_columns))
-    logging.info("Support set: all %d pos + %d random neg = %d total", n_pos, n_neg_sample, n_pos + n_neg_sample)
+                 len(y_train), len(X_pos), len(X_neg), len(y_val), len(y_test), len(feature_columns))
+    logging.info("Support set: %d pos + %d random neg = %d total",
+                 len(X_pos_sel), n_neg_sample, len(X_pos_sel) + n_neg_sample)
 
     multi_gpu = MultiGPUInference(gpu_config, tabicl_config)
     evaluator = Evaluator()
@@ -82,8 +110,8 @@ def main():
         rng = np.random.default_rng(args.seed + run)
         neg_idx = rng.choice(len(X_neg), size=min(n_neg_sample, len(X_neg)), replace=False)
 
-        X_support = np.vstack([X_pos, X_neg[neg_idx]])
-        y_support = np.concatenate([y_pos, y_neg[neg_idx]])
+        X_support = np.vstack([X_pos_sel, X_neg[neg_idx]])
+        y_support = np.concatenate([y_pos_sel, y_neg[neg_idx]])
 
         logging.info("Run %d/%d: evaluating on validation set", run + 1, args.n_runs)
         val_proba = multi_gpu.predict_proba_parallel(
@@ -146,7 +174,8 @@ def main():
         "experiment": {
             "method": "baseline_random_neg_from_all",
             "description": "All positives + random negatives from ALL negatives (no reliability filtering)",
-            "n_positives": int(n_pos),
+            "target_size": args.target_size,
+            "n_positives": int(len(X_pos_sel)),
             "n_negatives": int(n_neg_sample),
             "n_runs": args.n_runs,
             "base_seed": args.seed,
