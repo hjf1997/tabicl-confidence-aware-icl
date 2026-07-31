@@ -101,6 +101,10 @@ class SupportSetSelector:
             all_neg_idx = self._neg_sample_reliable(
                 candidate_idx, candidate_scores, n_neg_total
             )
+        elif self.neg_sampling_strategy == "informed":
+            all_neg_idx = self._neg_sample_informed(
+                candidate_idx, candidate_pred_vectors, candidate_scores, n_neg_total
+            )
         else:
             raise ValueError(f"Unknown neg_sampling_strategy: {self.neg_sampling_strategy}")
 
@@ -111,6 +115,27 @@ class SupportSetSelector:
         y_support = np.concatenate([y_pos_sel, y_neg_sel])
 
         return (X_support, y_support), (pos_selected_idx, all_neg_idx)
+
+    def _neg_sample_informed(self, candidate_idx, candidate_pred_vectors, candidate_scores, n):
+        """Informativeness-weighted sampling: balances reliability with prediction variance.
+
+        I(x_i) = alpha * variance_norm + (1 - alpha) * reliability_norm
+
+        High variance = model's decision depends on context (informative for ICL)
+        High reliability = label is likely correct (avoids noise)
+        The combination selects reliable boundary cases.
+        """
+        if len(candidate_idx) <= n:
+            return candidate_idx.copy()
+
+        alpha = 0.5
+        variance = candidate_pred_vectors.var(axis=1)
+        var_norm = (variance - variance.min()) / (variance.max() - variance.min() + 1e-10)
+        rel_norm = (candidate_scores - candidate_scores.min()) / (candidate_scores.max() - candidate_scores.min() + 1e-10)
+
+        informativeness = alpha * var_norm + (1 - alpha) * rel_norm
+        top_indices = np.argsort(informativeness)[-n:]
+        return candidate_idx[top_indices]
 
     def _neg_sample_reliable(self, candidate_idx, candidate_scores, n):
         """Top-n samples with highest reliability scores."""
