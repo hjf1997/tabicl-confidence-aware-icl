@@ -23,6 +23,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "supporting_set_constr"
 
 import torch.multiprocessing as mp
 
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, f1_score,
+    precision_score, recall_score, precision_recall_curve,
+)
+
 from config import (
     DataConfig, TabICLConfig, MultiGPUConfig, ReliabilityConfig,
     SupportSetConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH,
@@ -31,11 +36,46 @@ from data_loader import DataLoader
 from multi_gpu_inference import MultiGPUInference
 from reliability_scorer import ReliabilityScorer
 from support_set_selector import SupportSetSelector
-from evaluate import Evaluator
 
 logger = logging.getLogger(__name__)
 
 NEG_SAMPLING_METHODS = ["random", "reliable", "informed", "kmeans", "boundary", "hybrid"]
+
+
+def compute_metrics(y_true, y_proba, threshold=None):
+    """Compute metrics. Positive class = bogus (label 0).
+
+    If threshold is None, finds optimal threshold from the data (use for val).
+    If threshold is provided, applies it directly (use for test with val-determined threshold).
+
+    Returns dict with roc_auc, pr_auc, f1, precision, recall, optimal_threshold, n_predicted_bogus.
+    """
+    pos_proba = y_proba[:, 0]  # P(bogus)
+    y_binary = (y_true == 0).astype(int)  # 1 where bogus
+
+    roc_auc = roc_auc_score(y_binary, pos_proba)
+    pr_auc = average_precision_score(y_binary, pos_proba)
+
+    if threshold is None:
+        precision_curve, recall_curve, thresholds = precision_recall_curve(y_binary, pos_proba)
+        f1_scores = 2 * (precision_curve * recall_curve) / (precision_curve + recall_curve + 1e-8)
+        optimal_idx = np.argmax(f1_scores)
+        threshold = float(thresholds[optimal_idx]) if optimal_idx < len(thresholds) else 0.5
+
+    y_pred = (pos_proba >= threshold).astype(int)
+    f1 = float(f1_score(y_binary, y_pred))
+    prec = float(precision_score(y_binary, y_pred, zero_division=0))
+    rec = float(recall_score(y_binary, y_pred, zero_division=0))
+
+    return {
+        "roc_auc": float(roc_auc),
+        "pr_auc": float(pr_auc),
+        "f1": f1,
+        "precision": prec,
+        "recall": rec,
+        "optimal_threshold": float(threshold),
+        "n_predicted_bogus": int(y_pred.sum()),
+    }
 
 
 def select_positives_diversity(X_pos, n_pos, random_state=42):
@@ -120,7 +160,6 @@ def main():
     logger.info("Target sizes: %s", target_sizes)
 
     multi_gpu = MultiGPUInference(gpu_config, tabicl_config)
-    evaluator = Evaluator()
 
     # Stage A + B: compute reliability scores (shared across all target sizes)
     logger.info("=== Stage A: Building %d scoring support sets (size=%d) ===", args.K, args.support_size)
@@ -206,13 +245,13 @@ def main():
                 X_support, y_support, X_val_np,
                 desc=f"target={target_size} baseline run {run+1}: val",
             )
-            val_metrics = evaluator.compute_all(y_val, val_proba)
+            val_metrics = compute_metrics(y_val, val_proba)
 
             test_proba = multi_gpu.predict_proba_parallel(
                 X_support, y_support, X_test_np,
                 desc=f"target={target_size} baseline run {run+1}: test",
             )
-            test_metrics = evaluator.compute_all(y_test, test_proba)
+            test_metrics = compute_metrics(y_test, test_proba, threshold=val_metrics["optimal_threshold"])
 
             all_results.append({
                 "target_size": target_size,
@@ -221,9 +260,14 @@ def main():
                 "val_roc_auc": val_metrics["roc_auc"],
                 "val_pr_auc": val_metrics["pr_auc"],
                 "val_f1": val_metrics["f1"],
+                "val_precision": val_metrics["precision"],
+                "val_recall": val_metrics["recall"],
                 "test_roc_auc": test_metrics["roc_auc"],
                 "test_pr_auc": test_metrics["pr_auc"],
                 "test_f1": test_metrics["f1"],
+                "test_precision": test_metrics["precision"],
+                "test_recall": test_metrics["recall"],
+                "threshold": val_metrics["optimal_threshold"],
             })
             logger.info("    Baseline run %d: val_pr_auc=%.4f, test_pr_auc=%.4f",
                         run + 1, val_metrics["pr_auc"], test_metrics["pr_auc"])
@@ -250,13 +294,13 @@ def main():
                 X_support, y_support, X_val_np,
                 desc=f"target={target_size} {method}: val",
             )
-            val_metrics = evaluator.compute_all(y_val, val_proba)
+            val_metrics = compute_metrics(y_val, val_proba)
 
             test_proba = multi_gpu.predict_proba_parallel(
                 X_support, y_support, X_test_np,
                 desc=f"target={target_size} {method}: test",
             )
-            test_metrics = evaluator.compute_all(y_test, test_proba)
+            test_metrics = compute_metrics(y_test, test_proba, threshold=val_metrics["optimal_threshold"])
 
             all_results.append({
                 "target_size": target_size,
@@ -265,9 +309,14 @@ def main():
                 "val_roc_auc": val_metrics["roc_auc"],
                 "val_pr_auc": val_metrics["pr_auc"],
                 "val_f1": val_metrics["f1"],
+                "val_precision": val_metrics["precision"],
+                "val_recall": val_metrics["recall"],
                 "test_roc_auc": test_metrics["roc_auc"],
                 "test_pr_auc": test_metrics["pr_auc"],
                 "test_f1": test_metrics["f1"],
+                "test_precision": test_metrics["precision"],
+                "test_recall": test_metrics["recall"],
+                "threshold": val_metrics["optimal_threshold"],
             })
             logger.info("    %s: val_pr_auc=%.4f, test_pr_auc=%.4f",
                         method, val_metrics["pr_auc"], test_metrics["pr_auc"])
@@ -293,17 +342,28 @@ def main():
     # Print summary table
     logger.info("=== Summary ===")
     summary = df_results.groupby(["target_size", "method"]).agg(
+        val_roc_auc_mean=("val_roc_auc", "mean"),
         val_pr_auc_mean=("val_pr_auc", "mean"),
         val_pr_auc_std=("val_pr_auc", "std"),
+        val_f1_mean=("val_f1", "mean"),
+        val_precision_mean=("val_precision", "mean"),
+        val_recall_mean=("val_recall", "mean"),
+        test_roc_auc_mean=("test_roc_auc", "mean"),
         test_pr_auc_mean=("test_pr_auc", "mean"),
         test_pr_auc_std=("test_pr_auc", "std"),
+        test_f1_mean=("test_f1", "mean"),
+        test_precision_mean=("test_precision", "mean"),
+        test_recall_mean=("test_recall", "mean"),
     ).reset_index()
     summary.to_csv(output_dir / "ablation_summary.csv", index=False)
     for _, row in summary.iterrows():
-        logger.info("  target=%d  method=%-16s  val_pr_auc=%.4f±%.4f  test_pr_auc=%.4f±%.4f",
+        std_val = row["val_pr_auc_std"] if not np.isnan(row["val_pr_auc_std"]) else 0
+        std_test = row["test_pr_auc_std"] if not np.isnan(row["test_pr_auc_std"]) else 0
+        logger.info("  target=%d  method=%-16s  val_pr_auc=%.4f±%.4f  test[pr_auc=%.4f±%.4f  f1=%.4f  prec=%.4f  rec=%.4f]",
                     row["target_size"], row["method"],
-                    row["val_pr_auc_mean"], row["val_pr_auc_std"] if not np.isnan(row["val_pr_auc_std"]) else 0,
-                    row["test_pr_auc_mean"], row["test_pr_auc_std"] if not np.isnan(row["test_pr_auc_std"]) else 0)
+                    row["val_pr_auc_mean"], std_val,
+                    row["test_pr_auc_mean"], std_test,
+                    row["test_f1_mean"], row["test_precision_mean"], row["test_recall_mean"])
 
     # Save manifest
     manifest = {
