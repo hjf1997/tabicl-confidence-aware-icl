@@ -1,9 +1,61 @@
+import warnings
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import normalize
 from typing import List, Tuple
 
 from config import SupportSetConfig, ReliabilityConfig
+
+
+def impute_for_clustering(X: np.ndarray) -> np.ndarray:
+    """Return a NaN-free float64 copy of X suitable for KMeans.
+
+    Clustering only decides WHICH rows to select; the selected rows are taken
+    from the original array, so they keep their NaN when handed to TabICL,
+    which handles missing values itself. Imputing here therefore does not
+    change any value the model sees.
+
+    Missing entries are filled with their column median (0.0 for all-NaN columns).
+    """
+    X_float = np.asarray(X, dtype=np.float64)
+    nan_mask = np.isnan(X_float)
+    if not nan_mask.any():
+        return X_float
+
+    X_float = X_float.copy()
+    with warnings.catch_warnings():
+        # All-NaN columns warn here; they are handled just below.
+        warnings.simplefilter("ignore", RuntimeWarning)
+        col_median = np.nanmedian(X_float, axis=0)
+    col_median = np.where(np.isnan(col_median), 0.0, col_median)
+    X_float[nan_mask] = np.take(col_median, np.where(nan_mask)[1])
+    return X_float
+
+
+def _kmeans_medoid_indices(X_float: np.ndarray, n: int, random_state: int) -> np.ndarray:
+    """Cluster into n groups and return the index closest to each cluster centre."""
+    km = KMeans(n_clusters=n, random_state=random_state, n_init=3)
+    km.fit(X_float)
+
+    selected = []
+    for c in range(n):
+        cluster_indices = np.where(km.labels_ == c)[0]
+        if len(cluster_indices) == 0:
+            continue
+        dists = np.linalg.norm(X_float[cluster_indices] - km.cluster_centers_[c], axis=1)
+        selected.append(cluster_indices[np.argmin(dists)])
+    return np.array(selected)
+
+
+def diversity_sample_features(X: np.ndarray, n: int, random_state: int = 42) -> np.ndarray:
+    """Select n samples maximizing feature-space diversity via k-means. Returns indices.
+
+    Shared by the pipeline and the standalone run scripts so that every variant
+    selects an identical positive set for a given (data, n, random_state).
+    """
+    if len(X) <= n:
+        return np.arange(len(X))
+    return _kmeans_medoid_indices(impute_for_clustering(X), n, random_state)
 
 
 class SupportSetSelector:
@@ -276,23 +328,7 @@ class SupportSetSelector:
         self, X: np.ndarray, n: int, random_state: int = 42
     ) -> np.ndarray:
         """Select n samples maximizing feature-space diversity via k-means."""
-        if len(X) <= n:
-            return np.arange(len(X))
-
-        X_float = np.asarray(X, dtype=np.float64)
-        km = KMeans(n_clusters=n, random_state=random_state, n_init=3)
-        km.fit(X_float)
-
-        selected = []
-        for c in range(n):
-            cluster_mask = km.labels_ == c
-            cluster_indices = np.where(cluster_mask)[0]
-            if len(cluster_indices) == 0:
-                continue
-            dists = np.linalg.norm(X_float[cluster_indices] - km.cluster_centers_[c], axis=1)
-            selected.append(cluster_indices[np.argmin(dists)])
-
-        return np.array(selected)
+        return diversity_sample_features(X, n, random_state)
 
     def _diversity_sample_prediction_space(
         self, pred_vectors: np.ndarray, n: int, random_state: int = 42
@@ -301,20 +337,8 @@ class SupportSetSelector:
         if len(pred_vectors) <= n:
             return np.arange(len(pred_vectors))
 
-        preds_norm = normalize(np.asarray(pred_vectors, dtype=np.float64), norm="l2")
-        km = KMeans(n_clusters=n, random_state=random_state, n_init=3)
-        km.fit(preds_norm)
-
-        selected = []
-        for c in range(n):
-            cluster_mask = km.labels_ == c
-            cluster_indices = np.where(cluster_mask)[0]
-            if len(cluster_indices) == 0:
-                continue
-            dists = np.linalg.norm(preds_norm[cluster_indices] - km.cluster_centers_[c], axis=1)
-            selected.append(cluster_indices[np.argmin(dists)])
-
-        return np.array(selected)
+        preds_norm = normalize(impute_for_clustering(pred_vectors), norm="l2")
+        return _kmeans_medoid_indices(preds_norm, n, random_state)
 
     def _boundary_sample(
         self, scores: np.ndarray, n: int

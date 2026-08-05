@@ -17,7 +17,6 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
 from pathlib import Path
-from sklearn.cluster import KMeans
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "supporting_set_constr"))
 
@@ -35,7 +34,7 @@ from config import (
 from data_loader import DataLoader
 from multi_gpu_inference import MultiGPUInference
 from reliability_scorer import ReliabilityScorer
-from support_set_selector import SupportSetSelector
+from support_set_selector import SupportSetSelector, diversity_sample_features
 
 logger = logging.getLogger(__name__)
 
@@ -76,23 +75,6 @@ def compute_metrics(y_true, y_proba, threshold=None):
         "optimal_threshold": float(threshold),
         "n_predicted_bogus": int(y_pred.sum()),
     }
-
-
-def select_positives_diversity(X_pos, n_pos, random_state=42):
-    """Select n_pos diverse positives via KMeans. Returns indices."""
-    if len(X_pos) <= n_pos:
-        return np.arange(len(X_pos))
-    X_float = np.asarray(X_pos, dtype=np.float64)
-    km = KMeans(n_clusters=n_pos, random_state=random_state, n_init=3)
-    km.fit(X_float)
-    selected = []
-    for c in range(n_pos):
-        cluster_indices = np.where(km.labels_ == c)[0]
-        if len(cluster_indices) == 0:
-            continue
-        dists = np.linalg.norm(X_float[cluster_indices] - km.cluster_centers_[c], axis=1)
-        selected.append(cluster_indices[np.argmin(dists)])
-    return np.array(selected)
 
 
 def main():
@@ -225,7 +207,7 @@ def main():
         logger.info("=== Target size: %d (%d pos + %d neg) ===", target_size, n_half, n_half)
 
         # Select positives (shared for this target-size)
-        pos_idx = select_positives_diversity(X_pos, n_half, random_state=args.seed)
+        pos_idx = diversity_sample_features(X_pos, n_half, random_state=args.seed)
         X_pos_sel = X_pos[pos_idx]
         y_pos_sel = y_pos[pos_idx]
         logger.info("  Selected %d positives", len(pos_idx))

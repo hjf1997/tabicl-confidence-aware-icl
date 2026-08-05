@@ -13,6 +13,7 @@ import torch.multiprocessing as mp
 
 from config import DataConfig, TabICLConfig, MultiGPUConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH
 from data_loader import DataLoader
+from support_set_selector import diversity_sample_features
 from multi_gpu_inference import MultiGPUInference, estimate_max_query_chunk
 from evaluate import Evaluator
 
@@ -75,24 +76,9 @@ def main():
         n_neg_sample = len(X_pos)
 
     # Select positives (diversity sampling if needed)
-    if len(X_pos) <= n_pos_target:
-        X_pos_sel = X_pos
-        y_pos_sel = y_pos
-    else:
-        from sklearn.cluster import KMeans
-        km = KMeans(n_clusters=n_pos_target, random_state=42, n_init=3)
-        X_pos_float = np.asarray(X_pos, dtype=np.float64)
-        km.fit(X_pos_float)
-        pos_selected = []
-        for c in range(n_pos_target):
-            cluster_indices = np.where(km.labels_ == c)[0]
-            if len(cluster_indices) == 0:
-                continue
-            dists = np.linalg.norm(X_pos_float[cluster_indices] - km.cluster_centers_[c], axis=1)
-            pos_selected.append(cluster_indices[np.argmin(dists)])
-        pos_selected = np.array(pos_selected)
-        X_pos_sel = X_pos[pos_selected]
-        y_pos_sel = y_pos[pos_selected]
+    pos_selected = diversity_sample_features(X_pos, n_pos_target, random_state=42)
+    X_pos_sel = X_pos[pos_selected]
+    y_pos_sel = y_pos[pos_selected]
 
     logging.info("Data: train=%d (pos=%d, neg=%d), val=%d, test=%d, features=%d",
                  len(y_train), len(X_pos), len(X_neg), len(y_val), len(y_test), len(feature_columns))
@@ -110,10 +96,7 @@ def main():
     # Determine positive indices for id tracking
     pos_mask_idx = np.where(pos_mask)[0]
     neg_mask_idx = np.where(neg_mask)[0]
-    if len(X_pos) <= n_pos_target:
-        pos_selected_global = pos_mask_idx
-    else:
-        pos_selected_global = pos_mask_idx[pos_selected]
+    pos_selected_global = pos_mask_idx[pos_selected]
 
     for run in range(args.n_runs):
         rng = np.random.default_rng(args.seed + run)
