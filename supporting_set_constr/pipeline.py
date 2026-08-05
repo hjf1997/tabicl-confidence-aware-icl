@@ -228,6 +228,10 @@ class ConfidenceAwarePipeline:
                 "feature_importance_path": str(FEATURE_IMPORTANCE_PATH),
                 "top_features": config.data.top_features,
                 "selected_features": feature_columns,
+                "ordinal_encoded_columns": {
+                    col: len(mapping)
+                    for col, mapping in self.data_loader.categorical_encodings_.items()
+                },
             },
             "pipeline": {
                 "K": config.reliability.K,

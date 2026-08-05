@@ -396,6 +396,9 @@ def main():
             "n_suspect": n_suspect,
             "seed": args.seed,
             "top_features": args.top_features,
+            "ordinal_encoded_columns": {
+                col: len(mapping) for col, mapping in loader.categorical_encodings_.items()
+            },
         },
     }
     with open(output_dir / "artifact_manifest.json", "w") as f:

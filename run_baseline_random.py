@@ -208,6 +208,9 @@ def main():
             "n_runs": args.n_runs,
             "base_seed": args.seed,
             "top_features": args.top_features,
+            "ordinal_encoded_columns": {
+                col: len(mapping) for col, mapping in loader.categorical_encodings_.items()
+            },
         },
         "summary": summary,
     }
