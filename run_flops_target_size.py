@@ -110,13 +110,21 @@ def main():
 
     rows = []
     base = None
+    base_single = None
     for n in target_sizes:
         pq = per_query_flops(n, H, B)
         fit = fit_flops(n, H, B)
         call_cached = predict_flops(Q, n, H, B, kv_cache=True)
         call_uncached = predict_flops(Q, n, H, B, kv_cache=False)
+        # Production single-sample cost with NO pre-built cache: one query per
+        # call, context encoded within the call (includes the quadratic n^2
+        # ICL term). Applies when the service is stateless or the support set
+        # changes per request; with a persistent fitted classifier, the cached
+        # per_query_flops applies instead.
+        single_uncached = predict_flops(1, n, H, B, kv_cache=False)
         if base is None:
             base = pq["total"]
+            base_single = single_uncached["total"]
         rows.append({
             "target_size": n,
             "n_features": H,
@@ -127,15 +135,18 @@ def main():
             "per_query_icl": pq["icl"],
             "per_query_decoder": pq["decoder"],
             "per_query_vs_smallest": pq["total"] / base,
+            "single_query_uncached_flops": single_uncached["total"],
+            "single_query_uncached_vs_smallest": single_uncached["total"] / base_single,
             "fit_flops": fit["total"],
             "fit_amortized_per_query": fit["total"] / Q,
             "call_flops_cached": call_cached["total"],
             "call_flops_uncached": call_uncached["total"],
             "cache_speedup": call_uncached["total"] / call_cached["total"],
         })
-        logger.info("n=%6d  per_query=%.3e (x%.2f)  fit=%.3e  call(q=%d)=%.3e  cache_speedup=%.2fx",
-                    n, pq["total"], pq["total"] / base, fit["total"], Q,
-                    call_cached["total"], call_uncached["total"] / call_cached["total"])
+        logger.info("n=%6d  per_query=%.3e (x%.2f)  single_uncached=%.3e (x%.2f)  fit=%.3e  cache_speedup(q=%d)=%.2fx",
+                    n, pq["total"], pq["total"] / base,
+                    single_uncached["total"], single_uncached["total"] / base_single,
+                    fit["total"], Q, call_uncached["total"] / call_cached["total"])
 
     df = pd.DataFrame(rows)
     df.to_csv(output_dir / "flops_target_size.csv", index=False)
