@@ -1,0 +1,37 @@
+{
+  "artifact_type": "flops_target_size",
+  "created_at": "2026-08-05T15:31:54.082388+00:00",
+  "model": {
+    "model_type": "TabICL v2 (tabicl-classifier-v2-20260212)",
+    "architecture": {
+      "embed_dim": 128,
+      "col_num_blocks": 3,
+      "col_num_inds": 128,
+      "row_num_blocks": 3,
+      "row_num_cls": 4,
+      "icl_num_blocks": 12,
+      "icl_dim": 512,
+      "ff_factor": 2
+    }
+  },
+  "experiment": {
+    "target_sizes": [
+      100,
+      200,
+      500,
+      1000,
+      2000,
+      5000
+    ],
+    "n_features": 298,
+    "n_estimators": 8,
+    "n_query": 10000,
+    "per_query_linear_model": {
+      "intercept_flops": 4408397824,
+      "slope_flops_per_support_row": 196608,
+      "formula": "per_query_flops = intercept + slope * n_support (kv_cache=True)"
+    },
+    "counting_convention": "matmul FLOPs only (1 MAC = 2 FLOPs), matching torch FlopCounterMode",
+    "empirical_validation": null
+  }
+}
