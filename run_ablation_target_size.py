@@ -238,44 +238,58 @@ def main():
         # Save selected positive ids
         pos_ids_sel = ids_pos.iloc[pos_idx].reset_index(drop=True)
 
-        # --- Baseline: random from ALL negatives ---
-        logger.info("  Evaluating baseline (random from all negatives, %d runs)", args.baseline_runs)
-        for run in range(args.baseline_runs):
-            rng = np.random.default_rng(args.seed + run)
-            neg_idx_baseline = rng.choice(len(X_neg), size=min(n_half, len(X_neg)), replace=False)
-            X_support = np.vstack([X_pos_sel, X_neg[neg_idx_baseline]])
-            y_support = np.concatenate([y_pos_sel, y_neg[neg_idx_baseline]])
+        # --- Baselines: random negatives from ALL negatives, two positive policies ---
+        # baseline_fully_random: random positives + random negatives (paper main comparison)
+        # baseline_diverse_pos:  shared diversity-selected positives + random negatives
+        #                        (ablation; isolates the value of positive selection).
+        # Negative draws share the same per-run seed across both variants, so within
+        # a run the two baselines differ ONLY in the positive half.
+        for variant in ("baseline_fully_random", "baseline_diverse_pos"):
+            logger.info("  Evaluating %s (%d runs)", variant, args.baseline_runs)
+            for run in range(args.baseline_runs):
+                rng_neg = np.random.default_rng(args.seed + run)
+                neg_idx_baseline = rng_neg.choice(len(X_neg), size=min(n_half, len(X_neg)), replace=False)
 
-            val_proba = multi_gpu.predict_proba_parallel(
-                X_support, y_support, X_val_np,
-                desc=f"target={target_size} baseline run {run+1}: val",
-            )
-            val_metrics = compute_metrics(y_val, val_proba)
+                if variant == "baseline_fully_random":
+                    rng_pos = np.random.default_rng(args.seed + 7919 * (run + 1))
+                    pos_idx_b = rng_pos.choice(len(X_pos), size=min(n_half, len(X_pos)), replace=False)
+                    X_pos_b, y_pos_b = X_pos[pos_idx_b], y_pos[pos_idx_b]
+                else:
+                    X_pos_b, y_pos_b = X_pos_sel, y_pos_sel
 
-            test_proba = multi_gpu.predict_proba_parallel(
-                X_support, y_support, X_test_np,
-                desc=f"target={target_size} baseline run {run+1}: test",
-            )
-            test_metrics = compute_metrics(y_test, test_proba, threshold=val_metrics["optimal_threshold"])
+                X_support = np.vstack([X_pos_b, X_neg[neg_idx_baseline]])
+                y_support = np.concatenate([y_pos_b, y_neg[neg_idx_baseline]])
 
-            all_results.append({
-                "target_size": target_size,
-                "method": "baseline_random",
-                "run": run + 1,
-                "val_roc_auc": val_metrics["roc_auc"],
-                "val_pr_auc": val_metrics["pr_auc"],
-                "val_f1": val_metrics["f1"],
-                "val_precision": val_metrics["precision"],
-                "val_recall": val_metrics["recall"],
-                "test_roc_auc": test_metrics["roc_auc"],
-                "test_pr_auc": test_metrics["pr_auc"],
-                "test_f1": test_metrics["f1"],
-                "test_precision": test_metrics["precision"],
-                "test_recall": test_metrics["recall"],
-                "threshold": val_metrics["optimal_threshold"],
-            })
-            logger.info("    Baseline run %d: val_pr_auc=%.4f, test_pr_auc=%.4f",
-                        run + 1, val_metrics["pr_auc"], test_metrics["pr_auc"])
+                val_proba = multi_gpu.predict_proba_parallel(
+                    X_support, y_support, X_val_np,
+                    desc=f"target={target_size} {variant} run {run+1}: val",
+                )
+                val_metrics = compute_metrics(y_val, val_proba)
+
+                test_proba = multi_gpu.predict_proba_parallel(
+                    X_support, y_support, X_test_np,
+                    desc=f"target={target_size} {variant} run {run+1}: test",
+                )
+                test_metrics = compute_metrics(y_test, test_proba, threshold=val_metrics["optimal_threshold"])
+
+                all_results.append({
+                    "target_size": target_size,
+                    "method": variant,
+                    "run": run + 1,
+                    "val_roc_auc": val_metrics["roc_auc"],
+                    "val_pr_auc": val_metrics["pr_auc"],
+                    "val_f1": val_metrics["f1"],
+                    "val_precision": val_metrics["precision"],
+                    "val_recall": val_metrics["recall"],
+                    "test_roc_auc": test_metrics["roc_auc"],
+                    "test_pr_auc": test_metrics["pr_auc"],
+                    "test_f1": test_metrics["f1"],
+                    "test_precision": test_metrics["precision"],
+                    "test_recall": test_metrics["recall"],
+                    "threshold": val_metrics["optimal_threshold"],
+                })
+                logger.info("    %s run %d: val_pr_auc=%.4f, test_pr_auc=%.4f",
+                            variant, run + 1, val_metrics["pr_auc"], test_metrics["pr_auc"])
 
         # --- Neg-sampling strategies (using shared reliability scores) ---
         for method in NEG_SAMPLING_METHODS:
@@ -390,6 +404,10 @@ def main():
             "target_sizes": target_sizes,
             "neg_sampling_methods": NEG_SAMPLING_METHODS,
             "baseline_runs": args.baseline_runs,
+            "baseline_variants": {
+                "baseline_fully_random": "random positives + random negatives (paper main comparison)",
+                "baseline_diverse_pos": "diversity-selected positives + random negatives (ablation; was 'baseline_random' in runs before this change)",
+            },
             "K": args.K,
             "probe_design": args.probe_design,
             "n_anchors": args.n_anchors if args.probe_design == "anchored" else None,
