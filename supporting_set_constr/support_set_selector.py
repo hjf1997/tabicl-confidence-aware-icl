@@ -7,8 +7,56 @@ from typing import List, Tuple
 from config import SupportSetConfig, ReliabilityConfig
 
 
+# Values with |x| at or above this magnitude are treated as sentinel/placeholder
+# codes for missing-or-invalid data (e.g. 99999999999.99), not real magnitudes.
+# Observed sentinel columns (rsbt2445, rsbd1245, rsjd2445, rsjt1245) sit at
+# ~1e11; legitimate feature values in this data are far below 1e10.
+SENTINEL_ABS_THRESHOLD = 1e10
+
+
+def prepare_features_for_clustering(
+    X: np.ndarray, sentinel_abs_threshold: float = SENTINEL_ABS_THRESHOLD
+) -> np.ndarray:
+    """Sentinel-safe, NaN-safe, scale-safe float64 copy of raw FEATURES for KMeans.
+
+    Unscaled Euclidean KMeans on raw features is dominated by whichever columns
+    have the largest numeric scale. In this data, sentinel-coded columns
+    (~1e11) out-scale real features by ~8 orders of magnitude, which degenerates
+    the clustering (~44% singleton clusters when selecting anchors). Three steps:
+
+    1. Sentinel values (|x| >= threshold) -> NaN.
+    2. NaN -> column median (0.0 for all-NaN columns).
+    3. Z-score each column so no scale dominates the distance.
+
+    Selection helpers only use the result to decide WHICH rows to pick; the
+    picked rows keep their original values (sentinels included) when handed to
+    TabICL, whose internal preprocessing handles outliers itself.
+    """
+    X_float = np.asarray(X, dtype=np.float64).copy()
+    sentinel_mask = np.abs(X_float) >= sentinel_abs_threshold
+    if sentinel_mask.any():
+        X_float[sentinel_mask] = np.nan
+
+    nan_mask = np.isnan(X_float)
+    if nan_mask.any():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            col_median = np.nanmedian(X_float, axis=0)
+        col_median = np.where(np.isnan(col_median), 0.0, col_median)
+        X_float[nan_mask] = np.take(col_median, np.where(nan_mask)[1])
+
+    mean = X_float.mean(axis=0)
+    std = X_float.std(axis=0)
+    std = np.where(std < 1e-8, 1.0, std)
+    return (X_float - mean) / std
+
+
 def impute_for_clustering(X: np.ndarray) -> np.ndarray:
     """Return a NaN-free float64 copy of X suitable for KMeans.
+
+    For PREDICTION-SPACE inputs (probabilities in [0, 1]); no sentinel masking
+    or standardization. Raw feature matrices must go through
+    prepare_features_for_clustering() instead.
 
     Clustering only decides WHICH rows to select; the selected rows are taken
     from the original array, so they keep their NaN when handed to TabICL,
@@ -52,10 +100,12 @@ def diversity_sample_features(X: np.ndarray, n: int, random_state: int = 42) -> 
 
     Shared by the pipeline and the standalone run scripts so that every variant
     selects an identical positive set for a given (data, n, random_state).
+    Clusters on sentinel-masked, standardized features (raw scales would let
+    sentinel-coded columns dominate the Euclidean distance).
     """
     if len(X) <= n:
         return np.arange(len(X))
-    return _kmeans_medoid_indices(impute_for_clustering(X), n, random_state)
+    return _kmeans_medoid_indices(prepare_features_for_clustering(X), n, random_state)
 
 
 class SupportSetSelector:
@@ -133,7 +183,7 @@ class SupportSetSelector:
             # Not enough positives to differentiate anchors: all anchors = all positives.
             anchors = [pos_idx.copy() for _ in range(M)]
         else:
-            X_pos = impute_for_clustering(X_train[pos_idx])
+            X_pos = prepare_features_for_clustering(X_train[pos_idx])
             km = KMeans(n_clusters=n_pos, random_state=random_state, n_init=3)
             km.fit(X_pos)
             anchors = []
