@@ -92,6 +92,72 @@ class SupportSetSelector:
 
         return support_sets
 
+    def build_anchored_support_sets(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        M: int,
+        draws_per_anchor: int,
+        size: int,
+        positive_class: int = 0,
+        random_state: int = 42,
+    ) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[int]]:
+        """Factorial fixed-anchor probe design: M bogus anchors x draws_per_anchor
+        fraud resamples (M * draws_per_anchor probes total).
+
+        The trusted (positive/bogus) half is held FIXED within each anchor group,
+        so within-anchor prediction variance isolates sensitivity to the fraud
+        evidence, while across-anchor variance measures anchor sensitivity
+        (model brittleness under the trusted-anchor assumption).
+
+        Anchors are coverage-balanced, not random: the positive class is
+        clustered once into size//2 KMeans clusters, and each anchor draws one
+        member per cluster (different members per anchor). This replaces the
+        averaging-out that random anchors provided — a single random anchor
+        would make every probe hostage to one unrepresentative draw.
+
+        Returns
+        -------
+        (support_sets, anchor_ids)
+            support_sets: list of (X, y), anchor-major order (anchor 0's draws
+            first). anchor_ids[k] = anchor index of probe k, for variance
+            decomposition downstream.
+        """
+        pos_idx = np.where(y_train == positive_class)[0]
+        neg_idx = np.where(y_train != positive_class)[0]
+
+        n_pos = size // 2
+        n_neg = size - n_pos
+
+        if len(pos_idx) <= n_pos:
+            # Not enough positives to differentiate anchors: all anchors = all positives.
+            anchors = [pos_idx.copy() for _ in range(M)]
+        else:
+            X_pos = impute_for_clustering(X_train[pos_idx])
+            km = KMeans(n_clusters=n_pos, random_state=random_state, n_init=3)
+            km.fit(X_pos)
+            anchors = []
+            for m in range(M):
+                rng_m = np.random.default_rng(random_state + m)
+                members = []
+                for c in range(n_pos):
+                    cluster = np.where(km.labels_ == c)[0]
+                    if len(cluster) == 0:
+                        continue
+                    members.append(cluster[rng_m.integers(len(cluster))])
+                anchors.append(pos_idx[np.array(members)])
+
+        rng = np.random.default_rng(random_state + 10_000)
+        support_sets, anchor_ids = [], []
+        for m in range(M):
+            for _ in range(draws_per_anchor):
+                n_sample = rng.choice(neg_idx, size=min(n_neg, len(neg_idx)), replace=False)
+                idx = np.concatenate([anchors[m], n_sample])
+                support_sets.append((X_train[idx], y_train[idx]))
+                anchor_ids.append(m)
+
+        return support_sets, anchor_ids
+
     def build_optimized_support_set(
         self,
         X_positives: np.ndarray,

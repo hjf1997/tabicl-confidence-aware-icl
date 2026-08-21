@@ -1,9 +1,34 @@
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
-from typing import Dict
+from typing import Dict, Sequence, Tuple
 
 from config import ReliabilityConfig
+
+
+def variance_decomposition(
+    predictions: np.ndarray, anchor_ids: Sequence[int]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-sample variance decomposition for the factorial anchored probe design.
+
+    Args:
+        predictions: (n_samples, K) P(fraud) matrix, K = M * draws_per_anchor.
+        anchor_ids: length-K anchor index of each probe column.
+
+    Returns:
+        (within, between), each shape (n_samples,):
+        - within: mean over anchors of the variance across fraud draws —
+          sensitivity to the fraud evidence (the label-noise signal).
+        - between: variance of the per-anchor means — sensitivity to the
+          trusted anchor choice (model brittleness; should be small if the
+          anchored design is working).
+    """
+    anchor_ids = np.asarray(anchor_ids)
+    groups = [predictions[:, anchor_ids == m] for m in np.unique(anchor_ids)]
+    within = np.mean([g.var(axis=1) for g in groups], axis=0)
+    anchor_means = np.stack([g.mean(axis=1) for g in groups], axis=1)
+    between = anchor_means.var(axis=1)
+    return within, between
 
 
 class ReliabilityScorer:

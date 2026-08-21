@@ -3,6 +3,12 @@
 Design (agreed in discussion):
 - Probe support sets are built from TRAIN only (a probe needs labeled context;
   test labels must not enter the context).
+- Two probe designs (--probe-design): "random" resamples both halves per probe
+  (original design); "anchored" is the factorial fixed-anchor design — M
+  coverage-balanced bogus anchors x K/M fraud resamples, leveraging the
+  trusted-bogus assumption. Anchored runs additionally report the per-sample
+  within-anchor (fraud-evidence sensitivity) vs between-anchor (anchor
+  brittleness) variance decomposition.
 - Every row of train, val, and test is scored through the same K probes in a
   single joint run, so neighborhood agreement (A) and density (D) are computed
   over the union population with one normalization — no cross-cohort scale
@@ -42,7 +48,7 @@ from config import (
 )
 from data_loader import DataLoader
 from multi_gpu_inference import MultiGPUInference
-from reliability_scorer import ReliabilityScorer
+from reliability_scorer import ReliabilityScorer, variance_decomposition
 from support_set_selector import SupportSetSelector
 
 logger = logging.getLogger(__name__)
@@ -54,8 +60,13 @@ def main():
     parser.add_argument("--model-path", type=str, default=str(DEFAULT_MODEL_PATH), help="Local TabICL checkpoint path")
     parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
     parser.add_argument("--top-features", type=int, default=150, help="Number of top SHAP features to use")
-    parser.add_argument("--K", type=int, default=20, help="Number of probe support sets")
+    parser.add_argument("--K", type=int, default=20, help="Total number of probe support sets (anchored design: use e.g. 40 = M x draws)")
     parser.add_argument("--support-size", type=int, default=500, help="Rows per probe support set")
+    parser.add_argument("--probe-design", type=str, default="random", choices=["random", "anchored"],
+                        help="random: both halves resampled per probe (original design). "
+                             "anchored: factorial fixed-anchor design — M coverage-balanced bogus anchors, "
+                             "K/M fraud resamples each; within-anchor variance isolates fraud-evidence sensitivity")
+    parser.add_argument("--n-anchors", type=int, default=4, help="(anchored) Number of fixed bogus anchors M; K must be divisible by M")
     parser.add_argument("--threshold-method", type=str, default="percentile", choices=["fixed", "percentile"])
     parser.add_argument("--reliable-threshold", type=float, default=0.75, help="(fixed) reliable cutoff")
     parser.add_argument("--uncertain-threshold", type=float, default=0.45, help="(fixed) suspect cutoff")
@@ -113,14 +124,31 @@ def main():
 
     # Probes from train only.
     selector = SupportSetSelector(SupportSetConfig(), reliability_config)
-    probe_sets = selector.build_initial_support_sets(
-        X_train.values, y_train,
-        K=args.K,
-        size=args.support_size,
-        positive_class=data_config.positive_class,
-        random_state=args.seed,
-    )
-    logger.info("Built %d probe support sets (size=%d) from train", args.K, args.support_size)
+    if args.probe_design == "anchored":
+        if args.K % args.n_anchors != 0:
+            raise ValueError(f"--K ({args.K}) must be divisible by --n-anchors ({args.n_anchors})")
+        draws_per_anchor = args.K // args.n_anchors
+        probe_sets, anchor_ids = selector.build_anchored_support_sets(
+            X_train.values, y_train,
+            M=args.n_anchors,
+            draws_per_anchor=draws_per_anchor,
+            size=args.support_size,
+            positive_class=data_config.positive_class,
+            random_state=args.seed,
+        )
+        logger.info("Built %d anchored probes (M=%d anchors x %d fraud draws, size=%d) from train",
+                    args.K, args.n_anchors, draws_per_anchor, args.support_size)
+    else:
+        draws_per_anchor = None
+        anchor_ids = None
+        probe_sets = selector.build_initial_support_sets(
+            X_train.values, y_train,
+            K=args.K,
+            size=args.support_size,
+            positive_class=data_config.positive_class,
+            random_state=args.seed,
+        )
+        logger.info("Built %d random probe support sets (size=%d) from train", args.K, args.support_size)
 
     multi_gpu = MultiGPUInference(gpu_config, tabicl_config)
     predictions = multi_gpu.predict_proba_multi_support(
@@ -166,10 +194,28 @@ def main():
         "density": scorer.components_["D"],
         "classification": classification,
     })
+    if anchor_ids is not None:
+        var_within, var_between = variance_decomposition(predictions, anchor_ids)
+        df["var_within_anchor"] = var_within    # fraud-evidence sensitivity (the signal)
+        df["var_between_anchor"] = var_between  # anchor sensitivity (should be small)
+        ratio = var_between / (var_within + 1e-10)
+        logger.info("Variance decomposition: median within=%.5f, median between=%.5f, "
+                    "median between/within ratio=%.3f (design healthy if well below 1)",
+                    float(np.median(var_within)), float(np.median(var_between)),
+                    float(np.median(ratio)))
     df.to_csv(output_dir / "reliability_scores_all.csv", index=False)
     logger.info("Scores saved to %s", output_dir / "reliability_scores_all.csv")
 
-    df_pred = pd.DataFrame(predictions, columns=[f"p_fraud_probe_{k}" for k in range(args.K)])
+    if anchor_ids is not None:
+        probe_cols = []
+        seen_per_anchor = {}
+        for m in anchor_ids:
+            d = seen_per_anchor.get(m, 0)
+            probe_cols.append(f"p_fraud_anchor{m}_draw{d}")
+            seen_per_anchor[m] = d + 1
+    else:
+        probe_cols = [f"p_fraud_probe_{k}" for k in range(args.K)]
+    df_pred = pd.DataFrame(predictions, columns=probe_cols)
     df_pred.insert(0, data_config.id_col, ids_all.values)
     df_pred.insert(1, "split", split_all)
     df_pred.to_csv(output_dir / "prediction_vectors.csv", index=False)
@@ -196,6 +242,9 @@ def main():
         },
         "scoring": {
             "probe_source": "train_only",
+            "probe_design": args.probe_design,
+            "n_anchors": args.n_anchors if args.probe_design == "anchored" else None,
+            "draws_per_anchor": draws_per_anchor,
             "K": args.K,
             "support_set_size": args.support_size,
             "seed": args.seed,
