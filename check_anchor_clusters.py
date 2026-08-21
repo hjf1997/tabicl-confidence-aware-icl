@@ -89,15 +89,22 @@ def main():
         logger.info("Fewer bogus rows than clusters — anchored design would use all positives; nothing to check.")
         return
 
-    for name, prepare in [("raw (old)", impute_for_clustering),
-                          ("fixed (sentinel-masked + standardized)", prepare_features_for_clustering)]:
+    variants = [
+        ("raw (old)", lambda X: impute_for_clustering(X)),
+        ("zscore (sentinel-masked + standardized)",
+         lambda X: prepare_features_for_clustering(X, method="zscore")),
+        ("rank (current default)",
+         lambda X: prepare_features_for_clustering(X, method="rank")),
+    ]
+    for name, prepare in variants:
         stats = cluster_stats(prepare(X_pos), n_clusters, args.seed)
         logger.info("%s: singletons=%d (%.1f%%), median size=%.0f, top-5 sizes=%s",
                     name, stats["n_singletons"], stats["singleton_pct"],
                     stats["median_size"], stats["top5_sizes"])
 
-    logger.info("Healthy fixed distribution: singleton_pct in low single digits, "
-                "top-5 sizes within a small multiple of the median.")
+    logger.info("The 'rank' line is what build_anchored_support_sets / "
+                "diversity_sample_features now use. Healthy: singleton_pct in "
+                "low single digits, top-5 sizes within a small multiple of the median.")
 
 
 if __name__ == "__main__":

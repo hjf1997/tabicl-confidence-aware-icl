@@ -15,18 +15,26 @@ SENTINEL_ABS_THRESHOLD = 1e10
 
 
 def prepare_features_for_clustering(
-    X: np.ndarray, sentinel_abs_threshold: float = SENTINEL_ABS_THRESHOLD
+    X: np.ndarray,
+    sentinel_abs_threshold: float = SENTINEL_ABS_THRESHOLD,
+    method: str = "rank",
 ) -> np.ndarray:
     """Sentinel-safe, NaN-safe, scale-safe float64 copy of raw FEATURES for KMeans.
 
     Unscaled Euclidean KMeans on raw features is dominated by whichever columns
-    have the largest numeric scale. In this data, sentinel-coded columns
-    (~1e11) out-scale real features by ~8 orders of magnitude, which degenerates
-    the clustering (~44% singleton clusters when selecting anchors). Three steps:
+    have the largest numeric scale — in this data, sentinel-coded columns
+    (~1e11) out-scale real features by ~8 orders of magnitude and degenerate
+    the clustering (~44% singleton clusters when selecting anchors).
 
-    1. Sentinel values (|x| >= threshold) -> NaN.
-    2. NaN -> column median (0.0 for all-NaN columns).
-    3. Z-score each column so no scale dominates the distance.
+    method="rank" (default): each column is mapped to its average ranks scaled
+    to (0, 1); NaN and sentinel cells get the median rank 0.5. Rank transform
+    is immune to scale AND to heavy tails within a column — z-scoring alone
+    still leaves sub-threshold extreme codes / skewed counts at z ~ 5-10,
+    which keeps their rows as singleton clusters (observed: z-scoring only
+    reduced singletons 43.6% -> 26%).
+
+    method="zscore": sentinel mask -> median imputation -> per-column
+    standardization. Kept for comparison in check_anchor_clusters.py.
 
     Selection helpers only use the result to decide WHICH rows to pick; the
     picked rows keep their original values (sentinels included) when handed to
@@ -36,6 +44,26 @@ def prepare_features_for_clustering(
     sentinel_mask = np.abs(X_float) >= sentinel_abs_threshold
     if sentinel_mask.any():
         X_float[sentinel_mask] = np.nan
+
+    if method == "rank":
+        from scipy.stats import rankdata
+
+        out = np.empty_like(X_float)
+        for j in range(X_float.shape[1]):
+            col = X_float[:, j]
+            valid = ~np.isnan(col)
+            n_valid = int(valid.sum())
+            if n_valid <= 1:
+                out[:, j] = 0.5
+                continue
+            # average ranks scaled to (0, 1); ties (incl. constant columns)
+            # share a rank, so no fake variance is introduced
+            out[valid, j] = rankdata(col[valid]) / (n_valid + 1)
+            out[~valid, j] = 0.5
+        return out
+
+    if method != "zscore":
+        raise ValueError(f"Unknown method: {method}")
 
     nan_mask = np.isnan(X_float)
     if nan_mask.any():
