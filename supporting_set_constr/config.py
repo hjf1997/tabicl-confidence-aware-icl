@@ -57,6 +57,8 @@ class MultiGPUConfig:
 class ReliabilityConfig:
     K: int = 20
     support_set_size: int = 500
+    probe_design: str = "random"  # "random" or "anchored" (M fixed bogus anchors x K/M fraud draws)
+    n_anchors: int = 4  # anchored only; K must be divisible by n_anchors
     w_mean_prob: float = 0.30
     w_stability: float = 0.20
     w_entropy: float = 0.15

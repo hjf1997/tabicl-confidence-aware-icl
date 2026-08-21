@@ -18,8 +18,11 @@ def main():
     parser.add_argument("--model-path", type=str, default=str(DEFAULT_MODEL_PATH), help="Local TabICL checkpoint path")
     parser.add_argument("--num-gpus", type=int, default=4, help="Number of GPUs to use")
     parser.add_argument("--top-features", type=int, default=150, help="Number of top SHAP features to use")
-    parser.add_argument("--K", type=int, default=20, help="Number of diverse support sets")
+    parser.add_argument("--K", type=int, default=20, help="Number of probe support sets (anchored design: use e.g. 40 = M x draws)")
     parser.add_argument("--support-size", type=int, default=500, help="Initial support set size per set")
+    parser.add_argument("--probe-design", type=str, default="random", choices=["random", "anchored"],
+                        help="Stage A probe design: random (both halves resampled) or anchored (M fixed bogus anchors x K/M fraud draws)")
+    parser.add_argument("--n-anchors", type=int, default=4, help="(anchored) Number of fixed bogus anchors M; K must be divisible by M")
     parser.add_argument("--target-size", type=int, default=None, help="Final support set size (n/2 pos + n/2 neg). If not set, uses all positives + equal negatives")
     parser.add_argument("--max-iterations", type=int, default=1, help="Max iterations (default 1, no iterative refinement)")
     parser.add_argument("--threshold-method", type=str, default="percentile", choices=["fixed", "percentile"], help="Threshold method: fixed (manual thresholds) or percentile (adaptive)")
@@ -57,6 +60,8 @@ def main():
     )
     config.reliability.K = args.K
     config.reliability.support_set_size = args.support_size
+    config.reliability.probe_design = args.probe_design
+    config.reliability.n_anchors = args.n_anchors
     config.reliability.threshold_method = args.threshold_method
     config.reliability.reliable_threshold = args.reliable_threshold
     config.reliability.uncertain_threshold = args.uncertain_threshold

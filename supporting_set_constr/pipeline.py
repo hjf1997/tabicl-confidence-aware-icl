@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 from config import PipelineConfig, FEATURE_IMPORTANCE_PATH
 from data_loader import DataLoader
 from multi_gpu_inference import MultiGPUInference, estimate_max_query_chunk
-from reliability_scorer import ReliabilityScorer
+from reliability_scorer import ReliabilityScorer, variance_decomposition
 from support_set_selector import SupportSetSelector
 from evaluate import Evaluator
 
@@ -55,15 +55,31 @@ class ConfidenceAwarePipeline:
             len(y_train), len(y_pos), len(y_neg), len(y_val), len(feature_columns),
         )
 
-        # Stage A: initial random support sets
-        logger.info("Stage A: Building %d initial random support sets (size=%d)",
-                    config.reliability.K, config.reliability.support_set_size)
-        support_sets = self.selector.build_initial_support_sets(
-            X_train_np, y_train_np,
-            K=config.reliability.K,
-            size=config.reliability.support_set_size,
-            positive_class=config.data.positive_class,
-        )
+        # Stage A: probe support sets (random or anchored design)
+        if config.reliability.probe_design == "anchored":
+            M = config.reliability.n_anchors
+            if config.reliability.K % M != 0:
+                raise ValueError(f"K ({config.reliability.K}) must be divisible by n_anchors ({M})")
+            draws_per_anchor = config.reliability.K // M
+            logger.info("Stage A: Building %d anchored probes (M=%d anchors x %d fraud draws, size=%d)",
+                        config.reliability.K, M, draws_per_anchor, config.reliability.support_set_size)
+            support_sets, probe_anchor_ids = self.selector.build_anchored_support_sets(
+                X_train_np, y_train_np,
+                M=M,
+                draws_per_anchor=draws_per_anchor,
+                size=config.reliability.support_set_size,
+                positive_class=config.data.positive_class,
+            )
+        else:
+            probe_anchor_ids = None
+            logger.info("Stage A: Building %d initial random support sets (size=%d)",
+                        config.reliability.K, config.reliability.support_set_size)
+            support_sets = self.selector.build_initial_support_sets(
+                X_train_np, y_train_np,
+                K=config.reliability.K,
+                size=config.reliability.support_set_size,
+                positive_class=config.data.positive_class,
+            )
 
         best_support_set = None
         best_support_ids = None
@@ -108,6 +124,10 @@ class ConfidenceAwarePipeline:
                     np.where(classification["uncertain"], "uncertain", "suspect")
                 ),
             })
+            if probe_anchor_ids is not None:
+                var_within, var_between = variance_decomposition(predictions_matrix, probe_anchor_ids)
+                df_scores["var_within_anchor"] = var_within
+                df_scores["var_between_anchor"] = var_between
             df_scores.to_csv(output_dir / f"reliability_scores_iter{iteration + 1}.csv", index=False)
 
             # Stage D: build optimized support set
@@ -235,6 +255,8 @@ class ConfidenceAwarePipeline:
             },
             "pipeline": {
                 "K": config.reliability.K,
+                "probe_design": config.reliability.probe_design,
+                "n_anchors": config.reliability.n_anchors if config.reliability.probe_design == "anchored" else None,
                 "support_set_size_initial": config.reliability.support_set_size,
                 "support_set_composition": "all_positives + matched_negatives",
                 "max_iterations": config.max_iterations,

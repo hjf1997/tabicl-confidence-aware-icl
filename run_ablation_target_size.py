@@ -33,7 +33,7 @@ from config import (
 )
 from data_loader import DataLoader
 from multi_gpu_inference import MultiGPUInference
-from reliability_scorer import ReliabilityScorer
+from reliability_scorer import ReliabilityScorer, variance_decomposition
 from support_set_selector import SupportSetSelector, diversity_sample_features
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,9 @@ def main():
     parser.add_argument("--reliable-percentile", type=float, default=30.0)
     parser.add_argument("--suspect-percentile", type=float, default=30.0)
     parser.add_argument("--baseline-runs", type=int, default=5, help="Number of baseline random runs per target-size")
+    parser.add_argument("--probe-design", type=str, default="random", choices=["random", "anchored"],
+                        help="Stage A probe design: random (both halves resampled) or anchored (M fixed bogus anchors x K/M fraud draws)")
+    parser.add_argument("--n-anchors", type=int, default=4, help="(anchored) Number of fixed bogus anchors M; K must be divisible by M")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -156,12 +159,28 @@ def main():
     )
 
     selector_for_initial = SupportSetSelector(SupportSetConfig(), reliability_config)
-    support_sets = selector_for_initial.build_initial_support_sets(
-        X_train_np, y_train,
-        K=args.K,
-        size=args.support_size,
-        positive_class=data_config.positive_class,
-    )
+    if args.probe_design == "anchored":
+        if args.K % args.n_anchors != 0:
+            raise ValueError(f"--K ({args.K}) must be divisible by --n-anchors ({args.n_anchors})")
+        draws_per_anchor = args.K // args.n_anchors
+        support_sets, probe_anchor_ids = selector_for_initial.build_anchored_support_sets(
+            X_train_np, y_train,
+            M=args.n_anchors,
+            draws_per_anchor=draws_per_anchor,
+            size=args.support_size,
+            positive_class=data_config.positive_class,
+            random_state=args.seed,
+        )
+        logger.info("Built %d anchored probes (M=%d anchors x %d fraud draws)",
+                    args.K, args.n_anchors, draws_per_anchor)
+    else:
+        probe_anchor_ids = None
+        support_sets = selector_for_initial.build_initial_support_sets(
+            X_train_np, y_train,
+            K=args.K,
+            size=args.support_size,
+            positive_class=data_config.positive_class,
+        )
 
     logger.info("=== Stage B: Scoring %d negatives with %d support sets ===", len(X_neg), args.K)
     predictions_matrix = multi_gpu.predict_proba_multi_support(
@@ -197,6 +216,10 @@ def main():
             np.where(classification["uncertain"], "uncertain", "suspect")
         ),
     })
+    if probe_anchor_ids is not None:
+        var_within, var_between = variance_decomposition(predictions_matrix, probe_anchor_ids)
+        df_scores["var_within_anchor"] = var_within
+        df_scores["var_between_anchor"] = var_between
     df_scores.to_csv(output_dir / "reliability_scores.csv", index=False)
 
     # Run ablation across target sizes
@@ -368,6 +391,8 @@ def main():
             "neg_sampling_methods": NEG_SAMPLING_METHODS,
             "baseline_runs": args.baseline_runs,
             "K": args.K,
+            "probe_design": args.probe_design,
+            "n_anchors": args.n_anchors if args.probe_design == "anchored" else None,
             "support_size": args.support_size,
             "threshold_method": args.threshold_method,
             "reliable_percentile": args.reliable_percentile,
