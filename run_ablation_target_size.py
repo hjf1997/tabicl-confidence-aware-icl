@@ -93,6 +93,8 @@ def main():
     parser.add_argument("--reliable-percentile", type=float, default=30.0)
     parser.add_argument("--suspect-percentile", type=float, default=30.0)
     parser.add_argument("--baseline-runs", type=int, default=5, help="Number of baseline random runs per target-size")
+    parser.add_argument("--skip-baselines", action="store_true",
+                        help="Skip the two baseline variants (use when only the reliability methods matter, e.g. suspect-percentile sweeps)")
     parser.add_argument("--probe-design", type=str, default="random", choices=["random", "anchored"],
                         help="Stage A probe design: random (both halves resampled) or anchored (M fixed bogus anchors x K/M fraud draws)")
     parser.add_argument("--n-anchors", type=int, default=4, help="(anchored) Number of fixed bogus anchors M; K must be divisible by M")
@@ -244,7 +246,8 @@ def main():
         #                        (ablation; isolates the value of positive selection).
         # Negative draws share the same per-run seed across both variants, so within
         # a run the two baselines differ ONLY in the positive half.
-        for variant in ("baseline_fully_random", "baseline_diverse_pos"):
+        baseline_variants = () if args.skip_baselines else ("baseline_fully_random", "baseline_diverse_pos")
+        for variant in baseline_variants:
             logger.info("  Evaluating %s (%d runs)", variant, args.baseline_runs)
             for run in range(args.baseline_runs):
                 rng_neg = np.random.default_rng(args.seed + run)
@@ -404,7 +407,8 @@ def main():
             "target_sizes": target_sizes,
             "neg_sampling_methods": NEG_SAMPLING_METHODS,
             "baseline_runs": args.baseline_runs,
-            "baseline_variants": {
+            "baselines_skipped": args.skip_baselines,
+            "baseline_variants": None if args.skip_baselines else {
                 "baseline_fully_random": "random positives + random negatives (paper main comparison)",
                 "baseline_diverse_pos": "diversity-selected positives + random negatives (ablation; was 'baseline_random' in runs before this change)",
             },
