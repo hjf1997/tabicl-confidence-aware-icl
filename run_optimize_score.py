@@ -273,7 +273,9 @@ def main():
         out.to_csv(output_dir / "rescored_reliability_scores_all.csv", index=False)
 
         from scipy.stats import spearmanr
-        rho = float(spearmanr(old[fraud_mask], new_score[fraud_mask]).statistic)
+        # scipy < 1.9 names the field .correlation; >= 1.9 adds .statistic.
+        # Indexing works across all versions.
+        rho = float(spearmanr(old[fraud_mask], new_score[fraud_mask])[0])
         logger.info("Natural re-score: Spearman(old, new) on fraud rows = %.3f; "
                     "thresholds reliable=%.4f suspect=%.4f; saved rescored CSV for Level-2 checks",
                     rho, rel_t, sus_t)
