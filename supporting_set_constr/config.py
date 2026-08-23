@@ -67,6 +67,10 @@ class ReliabilityConfig:
     n_neighbors: int = 15
     similarity_metric: str = "cosine"
     threshold_method: str = "percentile"  # "fixed" or "percentile"
+    # Optional learned-weights JSON (from run_optimize_score.py). When set, the
+    # score is the learned linear combination of z-scored components instead of
+    # the fixed mixture below; n_neighbors is taken from the file.
+    score_weights_file: Optional[str] = None
     reliable_threshold: float = 0.75  # used when threshold_method="fixed"
     uncertain_threshold: float = 0.45  # used when threshold_method="fixed"
     reliable_percentile: float = 30.0  # top X% classified as reliable

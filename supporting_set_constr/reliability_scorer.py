@@ -1,9 +1,19 @@
+import json
+import logging
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 from typing import Dict, Sequence, Tuple
 
 from config import ReliabilityConfig
+
+logger = logging.getLogger(__name__)
+
+# Mapping from learned-weights feature names to components_ keys.
+FEATURE_TO_COMPONENT = {
+    "mu": "mu", "sigma": "sigma", "entropy": "H",
+    "agreement": "A", "density": "D",
+}
 
 
 def variance_decomposition(
@@ -37,6 +47,32 @@ class ReliabilityScorer:
         self.prediction_vectors_ = None
         self.scores_ = None
         self.components_ = None
+        self.learned_weights_ = None
+        if config.score_weights_file:
+            with open(config.score_weights_file) as f:
+                self.learned_weights_ = json.load(f)
+            lw_k = self.learned_weights_.get("n_neighbors")
+            if lw_k and lw_k != config.n_neighbors:
+                logger.info("score_weights_file specifies n_neighbors=%d (overriding config's %d)",
+                            lw_k, config.n_neighbors)
+                config.n_neighbors = lw_k
+            logger.info("Using learned score weights from %s (features: %s)",
+                        config.score_weights_file, self.learned_weights_["features"])
+
+    def _apply_learned_weights(self) -> np.ndarray:
+        """Learned linear score on z-scored components; higher = more reliable.
+
+        Standardization is within the scoring cohort (the policy the weights
+        were fit under); percentile thresholds downstream consume ranks only.
+        """
+        lw = self.learned_weights_
+        score = np.full(len(self.components_["mu"]), float(lw.get("intercept", 0.0)))
+        for feat, w in zip(lw["features"], lw["weights"]):
+            x = self.components_[FEATURE_TO_COMPONENT[feat]]
+            std = x.std()
+            z = (x - x.mean()) / (std if std > 1e-8 else 1.0)
+            score = score + w * z
+        return score
 
     def compute_scores(self, predictions_matrix: np.ndarray) -> np.ndarray:
         """Compute reliability scores for all fraud-labeled samples.
@@ -55,15 +91,19 @@ class ReliabilityScorer:
         A = self._neighborhood_agreement(predictions_matrix)
         D = self._density(predictions_matrix)
 
-        scores = (
-            self.config.w_mean_prob * mu
-            + self.config.w_stability * (1.0 - sigma)
-            + self.config.w_entropy * (1.0 - H)
-            + self.config.w_agreement * A
-            + self.config.w_density * D
-        )
-
         self.components_ = {"mu": mu, "sigma": sigma, "H": H, "A": A, "D": D}
+
+        if self.learned_weights_ is not None:
+            scores = self._apply_learned_weights()
+        else:
+            scores = (
+                self.config.w_mean_prob * mu
+                + self.config.w_stability * (1.0 - sigma)
+                + self.config.w_entropy * (1.0 - H)
+                + self.config.w_agreement * A
+                + self.config.w_density * D
+            )
+
         self.scores_ = scores
         return scores
 

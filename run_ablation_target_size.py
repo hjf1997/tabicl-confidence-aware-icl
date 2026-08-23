@@ -93,6 +93,8 @@ def main():
     parser.add_argument("--reliable-percentile", type=float, default=30.0)
     parser.add_argument("--suspect-percentile", type=float, default=30.0)
     parser.add_argument("--baseline-runs", type=int, default=5, help="Number of baseline random runs per target-size")
+    parser.add_argument("--score-weights", type=str, default=None,
+                        help="learned_weights.json from run_optimize_score.py; replaces the fixed component mixture")
     parser.add_argument("--skip-baselines", action="store_true",
                         help="Skip the two baseline variants (use when only the reliability methods matter, e.g. suspect-percentile sweeps)")
     parser.add_argument("--probe-design", type=str, default="random", choices=["random", "anchored"],
@@ -151,6 +153,7 @@ def main():
     # Stage A + B: compute reliability scores (shared across all target sizes)
     logger.info("=== Stage A: Building %d scoring support sets (size=%d) ===", args.K, args.support_size)
     reliability_config = ReliabilityConfig(
+        score_weights_file=args.score_weights,
         K=args.K,
         support_set_size=args.support_size,
         threshold_method=args.threshold_method,
@@ -415,6 +418,7 @@ def main():
             "K": args.K,
             "probe_design": args.probe_design,
             "n_anchors": args.n_anchors if args.probe_design == "anchored" else None,
+            "score_weights_file": args.score_weights,
             "support_size": args.support_size,
             "threshold_method": args.threshold_method,
             "reliable_percentile": args.reliable_percentile,
