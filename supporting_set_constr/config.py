@@ -37,6 +37,11 @@ class DataConfig:
 
 @dataclass
 class TabICLConfig:
+    # "tabicl" (default) or "tabpfn" (pip tabpfn==2.2.1, v2 weights from
+    # Prior-Labs/TabPFN-v2-clf on HuggingFace — no token needed for v2).
+    # Shared knobs (n_estimators, softmax_temperature, random_state,
+    # model_path) apply to both; batch_size/kv_cache/verbose are TabICL-only.
+    model_family: str = "tabicl"
     model_path: Optional[str] = str(DEFAULT_MODEL_PATH)
     n_estimators: int = 8
     batch_size: int = 8

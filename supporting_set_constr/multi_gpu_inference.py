@@ -13,6 +13,22 @@ _ROW_INTERCEPT = 138.54  # MB
 
 _PROGRESS_MSG = "__progress__"
 
+# Fixed outer query-chunk size for TabPFN (its memory_saving_mode handles the
+# fine-grained batching internally; the outer chunk just drives progress and
+# bounds transfer sizes). The TabICL chunk comes from the profiled estimator.
+TABPFN_QUERY_CHUNK = 5000
+
+
+def _make_classifier(model_family: str, device: str, model_kwargs: dict):
+    """Instantiate the in-context classifier for a worker process."""
+    if model_family == "tabpfn":
+        from tabpfn import TabPFNClassifier
+
+        return TabPFNClassifier(device=device, **model_kwargs)
+    from tabicl import TabICLClassifier
+
+    return TabICLClassifier(device=device, **model_kwargs)
+
 
 def estimate_max_query_chunk(
     n_support: int,
@@ -42,14 +58,13 @@ def _worker_inference(
     y_support: np.ndarray,
     X_query: np.ndarray,
     query_indices: np.ndarray,
-    tabicl_kwargs: dict,
+    model_family: str,
+    model_kwargs: dict,
     chunk_size: int,
     result_queue: mp.Queue,
     progress_queue: mp.Queue,
 ):
-    from tabicl import TabICLClassifier
-
-    clf = TabICLClassifier(device=device, **tabicl_kwargs)
+    clf = _make_classifier(model_family, device, model_kwargs)
     clf.fit(X_support, y_support)
 
     n = len(X_query)
@@ -75,18 +90,17 @@ def _worker_multi_support(
     support_sets: List[Tuple[np.ndarray, np.ndarray]],
     support_set_indices: List[int],
     X_query: np.ndarray,
-    tabicl_kwargs: dict,
+    model_family: str,
+    model_kwargs: dict,
     chunk_size: int,
     result_queue: mp.Queue,
     progress_queue: mp.Queue,
 ):
-    from tabicl import TabICLClassifier
-
     n = len(X_query)
     results = []
     for local_idx, global_idx in enumerate(support_set_indices):
         X_sup, y_sup = support_sets[local_idx]
-        clf = TabICLClassifier(device=device, **tabicl_kwargs)
+        clf = _make_classifier(model_family, device, model_kwargs)
         clf.fit(X_sup, y_sup)
 
         if n <= chunk_size:
@@ -110,18 +124,38 @@ class MultiGPUInference:
     def __init__(self, config: MultiGPUConfig, tabicl_config: TabICLConfig):
         self.config = config
         self.tabicl_config = tabicl_config
-        self.tabicl_kwargs = {
-            "n_estimators": tabicl_config.n_estimators,
-            "batch_size": tabicl_config.batch_size,
-            "softmax_temperature": tabicl_config.softmax_temperature,
-            "kv_cache": tabicl_config.kv_cache,
-            "random_state": tabicl_config.random_state,
-            "verbose": tabicl_config.verbose,
-        }
-        if tabicl_config.model_path:
-            self.tabicl_kwargs["model_path"] = tabicl_config.model_path
+        self.model_family = getattr(tabicl_config, "model_family", "tabicl")
+        if self.model_family == "tabpfn":
+            # tabpfn v2 (pip tabpfn==2.2.1): near-mirror of the TabICL API.
+            # fit_with_cache is the kv_cache analog (caches train-side state
+            # for repeated predict_proba calls on one fitted context).
+            self.model_kwargs = {
+                "n_estimators": tabicl_config.n_estimators,
+                "softmax_temperature": tabicl_config.softmax_temperature,
+                "random_state": tabicl_config.random_state,
+                "fit_mode": "fit_with_cache",
+                "memory_saving_mode": "auto",
+                "ignore_pretraining_limits": True,
+            }
+            if tabicl_config.model_path:
+                self.model_kwargs["model_path"] = tabicl_config.model_path
+        else:
+            self.model_kwargs = {
+                "n_estimators": tabicl_config.n_estimators,
+                "batch_size": tabicl_config.batch_size,
+                "softmax_temperature": tabicl_config.softmax_temperature,
+                "kv_cache": tabicl_config.kv_cache,
+                "random_state": tabicl_config.random_state,
+                "verbose": tabicl_config.verbose,
+            }
+            if tabicl_config.model_path:
+                self.model_kwargs["model_path"] = tabicl_config.model_path
+        # Backward-compat alias (older call sites referenced tabicl_kwargs).
+        self.tabicl_kwargs = self.model_kwargs
 
     def _get_chunk_size(self, n_support: int, n_features: int) -> int:
+        if self.model_family == "tabpfn":
+            return TABPFN_QUERY_CHUNK
         return estimate_max_query_chunk(
             n_support=n_support,
             n_features=n_features,
@@ -159,7 +193,8 @@ class MultiGPUInference:
                     y_support,
                     X_query[idx_chunk] if isinstance(X_query, np.ndarray) else X_query.iloc[idx_chunk].values,
                     idx_chunk,
-                    self.tabicl_kwargs,
+                    self.model_family,
+                    self.model_kwargs,
                     chunk_size,
                     result_queue,
                     progress_queue,
@@ -247,7 +282,8 @@ class MultiGPUInference:
                     gpu_support_sets[gpu_id],
                     gpu_assignments[gpu_id],
                     X_query_np,
-                    self.tabicl_kwargs,
+                    self.model_family,
+                    self.model_kwargs,
                     chunk_size,
                     result_queue,
                     progress_queue,

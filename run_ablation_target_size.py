@@ -80,6 +80,8 @@ def compute_metrics(y_true, y_proba, threshold=None):
 def main():
     parser = argparse.ArgumentParser(description="Ablation: target-size scaling with all neg-sampling methods")
     parser.add_argument("--setting", type=str, required=True, help="Data setting folder name")
+    parser.add_argument("--model", type=str, default="tabicl", choices=["tabicl", "tabpfn"],
+                        help="In-context model family. tabpfn requires pip tabpfn==2.2.1 and an explicit --model-path to the local v2 checkpoint")
     parser.add_argument("--model-path", type=str, default=str(DEFAULT_MODEL_PATH))
     parser.add_argument("--num-gpus", type=int, default=4)
     parser.add_argument("--top-features", type=int, default=150)
@@ -118,7 +120,11 @@ def main():
 
     # Load data
     data_config = DataConfig(setting=args.setting, top_features=args.top_features)
-    tabicl_config = TabICLConfig(model_path=args.model_path)
+    if args.model == "tabpfn" and args.model_path == str(DEFAULT_MODEL_PATH):
+        raise SystemExit("--model tabpfn requires an explicit --model-path to the local TabPFN v2 "
+                         "checkpoint (the default points at the TabICL checkpoint). "
+                         "Download tabpfn-v2-classifier.ckpt from huggingface.co/Prior-Labs/TabPFN-v2-clf.")
+    tabicl_config = TabICLConfig(model_family=args.model, model_path=args.model_path)
     gpu_config = MultiGPUConfig(
         num_gpus=args.num_gpus,
         devices=[f"cuda:{i}" for i in range(args.num_gpus)],
@@ -401,7 +407,8 @@ def main():
             "n_test": len(y_test),
         },
         "model": {
-            "model_type": "TabICLClassifier",
+            "model_type": "TabPFNClassifier (v2)" if args.model == "tabpfn" else "TabICLClassifier",
+            "model_family": args.model,
             "model_path": tabicl_config.model_path,
             "n_estimators": tabicl_config.n_estimators,
             "kv_cache": tabicl_config.kv_cache,
