@@ -29,7 +29,7 @@ from sklearn.metrics import (
 
 from config import (
     DataConfig, TabICLConfig, MultiGPUConfig, ReliabilityConfig,
-    SupportSetConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH,
+    SupportSetConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH, DEFAULT_TABPFN_MODEL_PATH,
 )
 from data_loader import DataLoader
 from multi_gpu_inference import MultiGPUInference
@@ -81,8 +81,9 @@ def main():
     parser = argparse.ArgumentParser(description="Ablation: target-size scaling with all neg-sampling methods")
     parser.add_argument("--setting", type=str, required=True, help="Data setting folder name")
     parser.add_argument("--model", type=str, default="tabicl", choices=["tabicl", "tabpfn"],
-                        help="In-context model family. tabpfn requires pip tabpfn==2.2.1 and an explicit --model-path to the local v2 checkpoint")
-    parser.add_argument("--model-path", type=str, default=str(DEFAULT_MODEL_PATH))
+                        help="In-context model family (tabpfn: pip tabpfn==2.2.1, v2 checkpoint)")
+    parser.add_argument("--model-path", type=str, default=None,
+                        help="Local checkpoint path; defaults to the family's path in config.py")
     parser.add_argument("--num-gpus", type=int, default=4)
     parser.add_argument("--top-features", type=int, default=150)
     parser.add_argument("--K", type=int, default=20, help="Number of scoring support sets")
@@ -120,10 +121,12 @@ def main():
 
     # Load data
     data_config = DataConfig(setting=args.setting, top_features=args.top_features)
-    if args.model == "tabpfn" and args.model_path == str(DEFAULT_MODEL_PATH):
-        raise SystemExit("--model tabpfn requires an explicit --model-path to the local TabPFN v2 "
-                         "checkpoint (the default points at the TabICL checkpoint). "
-                         "Download tabpfn-v2-classifier.ckpt from huggingface.co/Prior-Labs/TabPFN-v2-clf.")
+    if args.model_path is None:
+        args.model_path = str(DEFAULT_TABPFN_MODEL_PATH if args.model == "tabpfn" else DEFAULT_MODEL_PATH)
+    if not Path(args.model_path).exists():
+        raise SystemExit(f"Checkpoint not found: {args.model_path}\n"
+                         "Pass --model-path or place the checkpoint at the default location "
+                         "(see DEFAULT_MODEL_PATH / DEFAULT_TABPFN_MODEL_PATH in supporting_set_constr/config.py).")
     tabicl_config = TabICLConfig(model_family=args.model, model_path=args.model_path)
     gpu_config = MultiGPUConfig(
         num_gpus=args.num_gpus,

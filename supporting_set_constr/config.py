@@ -8,6 +8,11 @@ FEATURE_IMPORTANCE_PATH = PROJECT_ROOT / "exp" / "20260717_0807_importance" / "c
 
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "tabicl-main" / "checkpoints" / "tabicl-classifier-v2-20260212.ckpt"
 
+# TabPFN v2 checkpoint (download token-free from
+# huggingface.co/Prior-Labs/TabPFN-v2-clf and place it here).
+DEFAULT_TABPFN_MODEL_PATH = (PROJECT_ROOT / "tabpfn-checkpoints"
+                             / "tabpfn-v2-classifier-finetuned-zk73skhh.ckpt")
+
 
 @dataclass
 class DataConfig:
