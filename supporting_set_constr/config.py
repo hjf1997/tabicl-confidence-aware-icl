@@ -9,8 +9,10 @@ FEATURE_IMPORTANCE_PATH = PROJECT_ROOT / "exp" / "20260717_0807_importance" / "c
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "tabicl-main" / "checkpoints" / "tabicl-classifier-v2-20260212.ckpt"
 
 # TabPFN v2 checkpoint (download token-free from
-# huggingface.co/Prior-Labs/TabPFN-v2-clf and place it here).
-DEFAULT_TABPFN_MODEL_PATH = (PROJECT_ROOT / "tabpfn-checkpoints"
+# huggingface.co/Prior-Labs/TabPFN-v2-clf and place it here; the tabPFN-main
+# folder is the locally installed TabPFN package, mirroring tabicl-main).
+DEFAULT_TABPFN_MODEL_PATH = (PROJECT_ROOT / "tabPFN-main" / "checkpoints"
+                             / "tabpfn-checkpoints"
                              / "tabpfn-v2-classifier-finetuned-zk73skhh.ckpt")
 
 
