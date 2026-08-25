@@ -24,6 +24,15 @@ recall s.t. precision >= P), then applied once to the test set. The frozen
 pretrained checkpoint is evaluated under the same protocol as a baseline column
 unless --skip-frozen-baseline is given.
 
+Multi-GPU: launch with torchrun for DDP data parallelism, e.g.
+    torchrun --nproc_per_node=4 run_finetune_constrained.py --setting setting5 ...
+Each rank processes its own meta-batch chunks (throughput scales; per-GPU
+memory does NOT -- that is set by --max-data-size). Keep max_data_size small
+enough that (a) one chunk fits a T4 with backward and (b) chunks per epoch
+>= world_size, otherwise the loop degrades to chunk replication. The dual
+variable is kept identical across ranks by all-reducing the constraint gap;
+evaluation and artifact writes happen on rank 0 only.
+
 Enterprise env notes: default --model-path points at the local checkpoint (no
 download attempted); the tabicl fine-tuning loop imports `transformers`
 (tabicl/train/_optim.py), so that package must be preinstalled.
@@ -31,6 +40,7 @@ download attempted); the tabicl fine-tuning loop imports `transformers`
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +49,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "supporting_set_constr"))
 
@@ -177,8 +188,15 @@ def _build_classifier_class():
 
             loss = -soft_recall + self._lam * g
 
-            # dual ascent (dL/dlambda = g exactly; no autograd involved)
-            g_val = float(g.detach().item())
+            # dual ascent (dL/dlambda = g exactly; no autograd involved).
+            # Under DDP, average the gap across ranks so every rank applies
+            # the identical lambda update (and the dual step sees the global
+            # batch statistics, not one shard's).
+            g_det = g.detach()
+            if dist.is_available() and dist.is_initialized():
+                g_det = g_det.clone()
+                dist.all_reduce(g_det, op=dist.ReduceOp.AVG)
+            g_val = float(g_det.item())
             if self._g_ema is None:
                 self._g_ema = g_val
             else:
@@ -262,16 +280,29 @@ def main():
                         help="Skip evaluating the pretrained checkpoint under the same protocol")
     args = parser.parse_args()
 
+    # torchrun (DDP) detection: init the group here so the experiment name is
+    # agreed on before fit() (whose _ddp_env reuses the initialized group).
+    using_ddp = int(os.environ.get("RANK", -1)) != -1
+    if using_ddp and not dist.is_initialized():
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        dist.init_process_group(backend="nccl")
+    master = (not using_ddp) or dist.get_rank() == 0
+
     constrained = args.constrained == "on"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     arm = "constrained" if constrained else "ce"
     exp_name = f"{timestamp}_finetune_{arm}_{args.setting}"
+    if using_ddp:
+        holder = [exp_name if master else None]
+        dist.broadcast_object_list(holder, src=0)
+        exp_name = holder[0]
     output_dir = PROJECT_ROOT / "exp" / exp_name
     ckpt_dir = output_dir / "checkpoints"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if master:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.INFO if master else logging.WARNING,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -321,6 +352,11 @@ def main():
     logger.info("Fine-tuning up to %d epochs (early stopping on raw-val recall@precision>=%.2f, patience=%d)",
                 args.epochs, args.precision_target, args.patience)
     clf.fit(X_train.values, y_train, X_val=X_val.values, y_val=y_val, output_dir=ckpt_dir)
+
+    # fit() tears down the process group in its finally-block; from here on
+    # rank 0 owns evaluation and all artifact writes, other ranks exit.
+    if not master:
+        return
 
     if clf._dual_log:
         pd.DataFrame(
