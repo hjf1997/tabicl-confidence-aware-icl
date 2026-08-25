@@ -99,6 +99,34 @@ def recall_at_precision_score(y_binary, pos_proba, precision_target):
     return float(prec.max() - precision_target)
 
 
+def stratified_context_subsample(y, max_size, seed):
+    """Indices of a class-stratified subsample of at most max_size rows.
+
+    Evaluation fits TabICL with the training set as in-context support; the
+    full train set OOMs a single 16GB T4, and support-set size ablations show
+    performance plateaus well before 10k. Fixed seed => the same context every
+    epoch and for every arm, so model selection and comparisons stay
+    consistent."""
+    y = np.asarray(y)
+    n = len(y)
+    if max_size is None or max_size <= 0 or n <= max_size:
+        return np.arange(n)
+    rng = np.random.default_rng(seed)
+    parts = []
+    for c in np.unique(y):
+        ci = np.flatnonzero(y == c)
+        k = max(1, int(round(max_size * len(ci) / n)))
+        parts.append(rng.choice(ci, size=min(k, len(ci)), replace=False))
+    return np.sort(np.concatenate(parts))
+
+
+def chunked_predict_proba(clf_obj, X, chunk=2000):
+    """Predict in query slices so a big val/test set never lands on the GPU
+    in one piece (context state is cached across calls after fit)."""
+    return np.vstack([clf_obj.predict_proba(X[i:i + chunk])
+                      for i in range(0, len(X), chunk)])
+
+
 def compute_metrics(y_true, proba, precision_target, threshold=None):
     """threshold=None calibrates on this split (use for val); pass val's
     threshold when scoring test."""
@@ -150,7 +178,8 @@ def _build_classifier_class():
 
         def set_constrained_objective(self, *, enabled, precision_target,
                                       dual_lr, surrogate_temp, train_threshold,
-                                      lambda_init, lambda_ema_beta):
+                                      lambda_init, lambda_ema_beta,
+                                      eval_context_size):
             self._np = SimpleNamespace(
                 enabled=enabled,
                 precision_target=precision_target,
@@ -158,6 +187,7 @@ def _build_classifier_class():
                 surrogate_temp=surrogate_temp,
                 train_threshold=train_threshold,
                 lambda_ema_beta=lambda_ema_beta,
+                eval_context_size=eval_context_size,
             )
             self._lam = float(lambda_init)
             self._g_ema = None
@@ -212,8 +242,10 @@ def _build_classifier_class():
         # ---- model selection on the business metric (both arms) ----
         def _run_validation(self, inner, X_train, y_train, X_val, y_val):
             try:
-                inner.fit(X_train, y_train)
-                proba = inner.predict_proba(X_val)
+                idx = stratified_context_subsample(
+                    y_train, self._np.eval_context_size, self.random_state)
+                inner.fit(X_train[idx], np.asarray(y_train)[idx])
+                proba = chunked_predict_proba(inner, X_val)
             except (ValueError, RuntimeError) as e:
                 logger.warning("Validation failed: %s", e)
                 return ValidationMetrics(primary=float("nan"))
@@ -274,6 +306,10 @@ def main():
     parser.add_argument("--freeze-col", action="store_true")
     parser.add_argument("--freeze-row", action="store_true")
     parser.add_argument("--freeze-icl", action="store_true")
+    parser.add_argument("--eval-context-size", type=int, default=10000,
+                        help="Max train rows used as in-context support for validation "
+                             "and final evaluation (stratified, fixed seed; 0 = all rows "
+                             "-- OOMs a 16GB T4 on large settings)")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-frozen-baseline", action="store_true",
@@ -347,6 +383,7 @@ def main():
         train_threshold=args.train_threshold,
         lambda_init=args.lambda_init,
         lambda_ema_beta=args.lambda_ema_beta,
+        eval_context_size=args.eval_context_size,
     )
 
     logger.info("Fine-tuning up to %d epochs (early stopping on raw-val recall@precision>=%.2f, patience=%d)",
@@ -367,12 +404,29 @@ def main():
                     len(clf._dual_log), clf._lam)
 
     # ---- evaluation: calibrate t* on val, apply once to test ----
+    # Both arms use the same fixed stratified context subsample (full train as
+    # context OOMs a single T4) and chunked query prediction.
+    from tabicl import TabICLClassifier
+
+    ctx_idx = stratified_context_subsample(y_train, args.eval_context_size, args.seed)
+    X_ctx, y_ctx = X_train.values[ctx_idx], np.asarray(y_train)[ctx_idx]
+    logger.info("Evaluation context: %d/%d train rows (stratified, seed=%d)",
+                len(ctx_idx), len(y_train), args.seed)
+
     rows, preds = [], {}
 
-    def evaluate_arm(name, predict_proba):
-        val_proba = predict_proba(X_val.values)
+    def evaluate_arm(name, checkpoint_path):
+        eval_clf = TabICLClassifier(
+            n_estimators=args.n_estimators_inference,
+            model_path=str(checkpoint_path),
+            allow_auto_download=False,
+            device=args.device,
+            random_state=args.seed,
+        )
+        eval_clf.fit(X_ctx, y_ctx)
+        val_proba = chunked_predict_proba(eval_clf, X_val.values)
         val_m = compute_metrics(y_val, val_proba, args.precision_target)
-        test_proba = predict_proba(X_test.values)
+        test_proba = chunked_predict_proba(eval_clf, X_test.values)
         test_m = compute_metrics(y_test, test_proba, args.precision_target,
                                  threshold=val_m["threshold"])
         logger.info("[%s] val:  %s", name, val_m)
@@ -383,21 +437,12 @@ def main():
         return val_m, test_m
 
     logger.info("Evaluating fine-tuned model (threshold calibrated on val)")
-    ft_val, ft_test = evaluate_arm("finetuned_" + arm, clf.predict_proba)
+    ft_val, ft_test = evaluate_arm("finetuned_" + arm, ckpt_dir / "best.ckpt")
 
     frozen_val = frozen_test = None
     if not args.skip_frozen_baseline:
         logger.info("Evaluating frozen pretrained checkpoint under the same protocol")
-        from tabicl import TabICLClassifier
-        frozen = TabICLClassifier(
-            n_estimators=args.n_estimators_inference,
-            model_path=args.model_path,
-            allow_auto_download=False,
-            device=args.device,
-            random_state=args.seed,
-        )
-        frozen.fit(X_train.values, y_train)
-        frozen_val, frozen_test = evaluate_arm("frozen_pretrained", frozen.predict_proba)
+        frozen_val, frozen_test = evaluate_arm("frozen_pretrained", args.model_path)
 
     df_metrics = pd.DataFrame(rows)
     df_metrics.to_csv(output_dir / "finetune_metrics.csv", index=False)
@@ -443,6 +488,8 @@ def main():
             "n_estimators_finetune": args.n_estimators_finetune,
             "n_estimators_inference": args.n_estimators_inference,
             "patience": args.patience,
+            "eval_context_size": args.eval_context_size,
+            "n_eval_context_rows": int(len(ctx_idx)),
             "class_shuffle_method": "none",
             "freeze_col": args.freeze_col,
             "freeze_row": args.freeze_row,
