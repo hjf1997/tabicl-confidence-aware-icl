@@ -36,13 +36,20 @@ def _filter_ctor_kwargs(cls, kwargs: dict) -> dict:
 
 
 class _TabDPTAdapter:
-    """sklearn-style facade over tabdpt.TabDPTClassifier.
+    """sklearn-style facade over tabdpt.TabDPTClassifier (written against
+    tabdpt==1.2.0; unsupported constructor kwargs are filtered by signature).
 
     TabDPT takes its runtime knobs (context_size, n_ensembles, ...) at predict
-    time; this adapter binds them at construction so workers can call the same
-    fit(X, y) / predict_proba(X) contract as every other family. context_size
-    is clamped to the fitted support-set size (TabDPT retrieves its per-query
-    context from whatever was passed to fit).
+    time via ensemble_predict_proba; this adapter binds them at construction so
+    workers can call the same fit(X, y) / predict_proba(X) contract as every
+    other family. context_size is clamped to the fitted support-set size.
+
+    Deliberate non-defaults:
+    - context_reduction="retrieval": TabDPT's signature per-query kNN context
+      (upstream default is "subsample", which would bypass retrieval entirely)
+    - use_flash=False: T4 GPUs (SM 7.5) predate flash-attention support
+    - compile=False: workers build a fresh model per support set, so
+      per-process torch.compile time would dominate the sweep
     """
 
     def __init__(self, device: str, model_path: Optional[str] = None,
@@ -50,19 +57,21 @@ class _TabDPTAdapter:
                  seed: int = 42):
         from tabdpt import TabDPTClassifier
 
-        ctor = {"device": device}
+        ctor = {
+            "device": device,
+            "context_reduction": "retrieval",
+            "use_flash": False,
+            "compile": False,
+            "verbose": False,
+        }
         if model_path:
-            # Upstream has renamed this across releases; try the known names.
-            for key in ("model_path", "path", "checkpoint_path"):
-                probe = _filter_ctor_kwargs(TabDPTClassifier, {key: model_path})
-                if probe:
-                    ctor[key] = model_path
-                    break
-            else:
-                raise ValueError(
-                    "This tabdpt version exposes no checkpoint-path argument; "
-                    "pre-populate the HuggingFace cache instead of --model-path.")
-        self._model = TabDPTClassifier(**_filter_ctor_kwargs(TabDPTClassifier, ctor))
+            ctor["model_weight_path"] = model_path
+        kept = _filter_ctor_kwargs(TabDPTClassifier, ctor)
+        if model_path and "model_weight_path" not in kept:
+            raise ValueError(
+                "This tabdpt version has no model_weight_path argument; "
+                "pre-populate the HuggingFace cache instead of --model-path.")
+        self._model = TabDPTClassifier(**kept)
         self._n_ensembles = n_ensembles
         self._context_size = context_size
         self._seed = seed
@@ -74,23 +83,17 @@ class _TabDPTAdapter:
         return self
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        kwargs = {
-            "n_ensembles": self._n_ensembles,
-            "context_size": min(self._context_size, self._n_fitted),
-            "seed": self._seed,
-        }
-        # Tolerate signature drift: retry without the kwargs it rejects.
-        while True:
-            try:
-                return self._model.predict_proba(X, **kwargs)
-            except TypeError as e:
-                dropped = next((k for k in list(kwargs) if k in str(e)), None)
-                if dropped is None:
-                    if kwargs:
-                        kwargs = {}
-                        continue
-                    raise
-                kwargs.pop(dropped)
+        context_size = min(self._context_size, self._n_fitted)
+        if hasattr(self._model, "ensemble_predict_proba"):
+            return self._model.ensemble_predict_proba(
+                X,
+                n_ensembles=self._n_ensembles,
+                context_size=context_size,
+                permute_classes=True,
+                seed=self._seed,
+            )
+        return self._model.predict_proba(X, context_size=context_size,
+                                         seed=self._seed)
 
 
 def _make_classifier(model_family: str, device: str, model_kwargs: dict):
