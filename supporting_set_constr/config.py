@@ -16,17 +16,25 @@ DEFAULT_MODEL_PATH = PROJECT_ROOT / "tabicl-main" / "checkpoints" / "tabicl-clas
 # Both load through the same pip tabpfn==2.2.1 TabPFNClassifier — choose the
 # variant with --model-path.
 DEFAULT_TABPFN_MODEL_PATH = (PROJECT_ROOT / "TabPFN-main" / "checkpoints" / "tabpfn-v2-classifier-finetuned-zk73skhh.ckpt")
-DEFAULT_TABPFN_VANILLA_MODEL_PATH = (PROJECT_ROOT / "TabPFN-main" / "checkpoints" / "tabpfn-v2-classifier.ckpt")
 
-# Default checkpoint per --model family. None = the upstream package resolves
-# its own weights (auto-download where internet is available; on the offline
-# server always pass --model-path / pre-populate the HF cache).
+# Baseline checkpoints downloaded 2026-09 (HF: Prior-Labs/TabPFN-v2-clf,
+# Prior-Labs/tabpfn_2_5, Prior-Labs/tabpfn_3, Layer6/TabDPT). On the server
+# PROJECT_ROOT resolves to /home/aida/jhu305/tabular_model.
+CHECKPOINTS_DIR = PROJECT_ROOT / "checkpoints"
+DEFAULT_TABPFN_VANILLA_MODEL_PATH = CHECKPOINTS_DIR / "tabpfn-v2-classifier.ckpt"
+DEFAULT_TABPFN_V25_MODEL_PATH = CHECKPOINTS_DIR / "tabpfn-v2.5-classifier-v2.5_default.ckpt"
+DEFAULT_TABPFN_V3_MODEL_PATH = CHECKPOINTS_DIR / "tabpfn-v3-classifier-v3_default.ckpt"
+DEFAULT_TABDPT_MODEL_PATH = CHECKPOINTS_DIR / "tabdpt1_2.safetensors"
+
+# Default checkpoint per --model family (override with --model-path; the
+# tabpfn family's default is the finetuned zk73skhh variant we have run all
+# along — pass DEFAULT_TABPFN_VANILLA_MODEL_PATH for the plain Nature v2).
 DEFAULT_MODEL_PATHS = {
     "tabicl": DEFAULT_MODEL_PATH,
     "tabpfn": DEFAULT_TABPFN_MODEL_PATH,  # = Real-TabPFN variant, see note above
-    "tabpfn_v25": None,  # needs pip tabpfn>=8.0.0 (separate conda env)
-    "tabpfn_v3": None,   # needs pip tabpfn>=8.0.0 (separate conda env)
-    "tabdpt": None,      # pip tabdpt; weights via path or HF cache
+    "tabpfn_v25": DEFAULT_TABPFN_V25_MODEL_PATH,  # needs pip tabpfn>=8.0.0 env
+    "tabpfn_v3": DEFAULT_TABPFN_V3_MODEL_PATH,    # needs pip tabpfn>=8.0.0 env
+    "tabdpt": DEFAULT_TABDPT_MODEL_PATH,          # pip tabdpt
 }
 
 
