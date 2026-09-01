@@ -7,9 +7,16 @@ For each target-size:
 4. Apply each neg-sampling strategy using shared scores
 5. Evaluate all variants on validation + test
 
+Cross-model comparison: --model picks the frozen ICL family (tabicl, tabpfn v2
+line, tabpfn_v25/v3, tabdpt); --support-sets <prior exp dir> reuses that run's
+materialized support sets verbatim (skipping the probe/scoring stages), so all
+families are evaluated on byte-identical context — verified by the
+support_sha256 column in ablation_results.csv.
+
 Output: single CSV with columns [target_size, method, split, pr_auc, roc_auc, f1, ...]
 """
 import argparse
+import hashlib
 import logging
 import json
 import sys
@@ -29,10 +36,10 @@ from sklearn.metrics import (
 
 from config import (
     DataConfig, TabICLConfig, MultiGPUConfig, ReliabilityConfig,
-    SupportSetConfig, PROJECT_ROOT, DEFAULT_MODEL_PATH, DEFAULT_TABPFN_MODEL_PATH,
+    SupportSetConfig, PROJECT_ROOT, DEFAULT_MODEL_PATHS,
 )
 from data_loader import DataLoader
-from multi_gpu_inference import MultiGPUInference
+from multi_gpu_inference import MultiGPUInference, MODEL_FAMILIES
 from reliability_scorer import ReliabilityScorer, variance_decomposition
 from support_set_selector import SupportSetSelector, diversity_sample_features
 
@@ -77,13 +84,52 @@ def compute_metrics(y_true, y_proba, threshold=None):
     }
 
 
+def array_sha256(*arrays) -> str:
+    """Order-sensitive content hash of numpy arrays (16 hex chars).
+
+    Used to verify that runs across model families consumed byte-identical
+    inputs: matching hashes = matching support sets / query matrices.
+    """
+    h = hashlib.sha256()
+    for a in arrays:
+        a = np.ascontiguousarray(a)
+        h.update(str(a.dtype).encode())
+        h.update(str(a.shape).encode())
+        h.update(a.tobytes())
+    return h.hexdigest()[:16]
+
+
+def load_support_set_csv(csv_path: Path, feature_columns, label_col: str):
+    """Load a materialized support set saved by a previous ablation run.
+
+    Returns (X_support float64, y_support). Raises if any expected feature
+    column is missing (e.g. --top-features mismatch with the source run).
+    """
+    df = pd.read_csv(csv_path)
+    missing = [c for c in feature_columns if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{csv_path} lacks {len(missing)} expected feature column(s) "
+            f"(first: {missing[:3]}); was the source run using the same --top-features?")
+    return df[feature_columns].values.astype(np.float64), df[label_col].values
+
+
 def main():
     parser = argparse.ArgumentParser(description="Ablation: target-size scaling with all neg-sampling methods")
     parser.add_argument("--setting", type=str, required=True, help="Data setting folder name")
-    parser.add_argument("--model", type=str, default="tabicl", choices=["tabicl", "tabpfn"],
-                        help="In-context model family (tabpfn: pip tabpfn==2.2.1, v2 checkpoint)")
+    parser.add_argument("--model", type=str, default="tabicl", choices=list(MODEL_FAMILIES),
+                        help="In-context model family. tabpfn = v2 line (pip tabpfn==2.2.1; "
+                             "vanilla vs Real-TabPFN via --model-path); tabpfn_v25/tabpfn_v3 "
+                             "need pip tabpfn>=8.0.0; tabdpt needs pip tabdpt.")
     parser.add_argument("--model-path", type=str, default=None,
-                        help="Local checkpoint path; defaults to the family's path in config.py")
+                        help="Local checkpoint path; defaults to the family's path in config.py "
+                             "(families with no default resolve weights via their package/HF cache)")
+    parser.add_argument("--tabdpt-context-size", type=int, default=2048,
+                        help="(tabdpt) rows retrieved per query; clamped to the support-set size")
+    parser.add_argument("--support-sets", type=str, default=None,
+                        help="Path to a previous ablation exp dir; reuse its materialized "
+                             "target_<size>/support_set_<method>.csv files instead of running "
+                             "the probe/scoring stages (cross-model comparison on identical sets)")
     parser.add_argument("--num-gpus", type=int, default=4)
     parser.add_argument("--top-features", type=int, default=150)
     parser.add_argument("--K", type=int, default=20, help="Number of scoring support sets")
@@ -122,12 +168,21 @@ def main():
     # Load data
     data_config = DataConfig(setting=args.setting, top_features=args.top_features)
     if args.model_path is None:
-        args.model_path = str(DEFAULT_TABPFN_MODEL_PATH if args.model == "tabpfn" else DEFAULT_MODEL_PATH)
-    if not Path(args.model_path).exists():
+        default_path = DEFAULT_MODEL_PATHS.get(args.model)
+        args.model_path = str(default_path) if default_path is not None else None
+    if args.model_path is not None and not Path(args.model_path).exists():
         raise SystemExit(f"Checkpoint not found: {args.model_path}\n"
                          "Pass --model-path or place the checkpoint at the default location "
-                         "(see DEFAULT_MODEL_PATH / DEFAULT_TABPFN_MODEL_PATH in supporting_set_constr/config.py).")
-    tabicl_config = TabICLConfig(model_family=args.model, model_path=args.model_path)
+                         "(see DEFAULT_MODEL_PATHS in supporting_set_constr/config.py).")
+    if args.model_path is None:
+        logging.getLogger(__name__).warning(
+            "No checkpoint path for family '%s'; the package will resolve its own weights "
+            "(requires internet or a pre-populated HF cache).", args.model)
+    tabicl_config = TabICLConfig(model_family=args.model, model_path=args.model_path,
+                                 tabdpt_context_size=args.tabdpt_context_size)
+    support_sets_src = Path(args.support_sets) if args.support_sets else None
+    if support_sets_src is not None and not support_sets_src.is_dir():
+        raise SystemExit(f"--support-sets dir not found: {support_sets_src}")
     gpu_config = MultiGPUConfig(
         num_gpus=args.num_gpus,
         devices=[f"cuda:{i}" for i in range(args.num_gpus)],
@@ -172,69 +227,76 @@ def main():
         suspect_percentile=args.suspect_percentile,
     )
 
-    selector_for_initial = SupportSetSelector(SupportSetConfig(), reliability_config)
-    if args.probe_design == "anchored":
-        if args.K % args.n_anchors != 0:
-            raise ValueError(f"--K ({args.K}) must be divisible by --n-anchors ({args.n_anchors})")
-        draws_per_anchor = args.K // args.n_anchors
-        support_sets, probe_anchor_ids = selector_for_initial.build_anchored_support_sets(
-            X_train_np, y_train,
-            M=args.n_anchors,
-            draws_per_anchor=draws_per_anchor,
-            size=args.support_size,
-            positive_class=data_config.positive_class,
-            random_state=args.seed,
-        )
-        logger.info("Built %d anchored probes (M=%d anchors x %d fraud draws)",
-                    args.K, args.n_anchors, draws_per_anchor)
+    if support_sets_src is not None:
+        logger.info("=== Reusing materialized support sets from %s (probe/scoring stages skipped) ===",
+                    support_sets_src)
+        scorer = None
+        reliability_scores = classification = prediction_vectors = None
+        n_reliable = n_uncertain = n_suspect = None
     else:
-        probe_anchor_ids = None
-        support_sets = selector_for_initial.build_initial_support_sets(
-            X_train_np, y_train,
-            K=args.K,
-            size=args.support_size,
-            positive_class=data_config.positive_class,
+        selector_for_initial = SupportSetSelector(SupportSetConfig(), reliability_config)
+        if args.probe_design == "anchored":
+            if args.K % args.n_anchors != 0:
+                raise ValueError(f"--K ({args.K}) must be divisible by --n-anchors ({args.n_anchors})")
+            draws_per_anchor = args.K // args.n_anchors
+            support_sets, probe_anchor_ids = selector_for_initial.build_anchored_support_sets(
+                X_train_np, y_train,
+                M=args.n_anchors,
+                draws_per_anchor=draws_per_anchor,
+                size=args.support_size,
+                positive_class=data_config.positive_class,
+                random_state=args.seed,
+            )
+            logger.info("Built %d anchored probes (M=%d anchors x %d fraud draws)",
+                        args.K, args.n_anchors, draws_per_anchor)
+        else:
+            probe_anchor_ids = None
+            support_sets = selector_for_initial.build_initial_support_sets(
+                X_train_np, y_train,
+                K=args.K,
+                size=args.support_size,
+                positive_class=data_config.positive_class,
+            )
+
+        logger.info("=== Stage B: Scoring %d negatives with %d support sets ===", len(X_neg), args.K)
+        predictions_matrix = multi_gpu.predict_proba_multi_support(
+            support_sets=support_sets,
+            X_query=X_neg,
+            desc="Stage B: scoring negatives",
         )
 
-    logger.info("=== Stage B: Scoring %d negatives with %d support sets ===", len(X_neg), args.K)
-    predictions_matrix = multi_gpu.predict_proba_multi_support(
-        support_sets=support_sets,
-        X_query=X_neg,
-        desc="Stage B: scoring negatives",
-    )
+        scorer = ReliabilityScorer(reliability_config)
+        reliability_scores = scorer.compute_scores(predictions_matrix)
+        classification = scorer.classify_samples(reliability_scores)
+        prediction_vectors = scorer.prediction_vectors_
 
-    scorer = ReliabilityScorer(reliability_config)
-    reliability_scores = scorer.compute_scores(predictions_matrix)
-    classification = scorer.classify_samples(reliability_scores)
-    prediction_vectors = scorer.prediction_vectors_
+        n_reliable = int(classification["reliable"].sum())
+        n_uncertain = int(classification["uncertain"].sum())
+        n_suspect = int(classification["suspect"].sum())
+        resolved = scorer.resolved_thresholds_
+        logger.info("Stage C: Thresholds (reliable=%.4f, suspect=%.4f) → Reliable=%d, Uncertain=%d, Suspect=%d",
+                    resolved["reliable_threshold"], resolved["uncertain_threshold"],
+                    n_reliable, n_uncertain, n_suspect)
 
-    n_reliable = int(classification["reliable"].sum())
-    n_uncertain = int(classification["uncertain"].sum())
-    n_suspect = int(classification["suspect"].sum())
-    resolved = scorer.resolved_thresholds_
-    logger.info("Stage C: Thresholds (reliable=%.4f, suspect=%.4f) → Reliable=%d, Uncertain=%d, Suspect=%d",
-                resolved["reliable_threshold"], resolved["uncertain_threshold"],
-                n_reliable, n_uncertain, n_suspect)
-
-    # Save reliability scores
-    df_scores = pd.DataFrame({
-        data_config.id_col: ids_neg.values,
-        "reliability_score": reliability_scores,
-        "mu": scorer.components_["mu"],
-        "sigma": scorer.components_["sigma"],
-        "entropy": scorer.components_["H"],
-        "agreement": scorer.components_["A"],
-        "density": scorer.components_["D"],
-        "classification": np.where(
-            classification["reliable"], "reliable",
-            np.where(classification["uncertain"], "uncertain", "suspect")
-        ),
-    })
-    if probe_anchor_ids is not None:
-        var_within, var_between = variance_decomposition(predictions_matrix, probe_anchor_ids)
-        df_scores["var_within_anchor"] = var_within
-        df_scores["var_between_anchor"] = var_between
-    df_scores.to_csv(output_dir / "reliability_scores.csv", index=False)
+        # Save reliability scores
+        df_scores = pd.DataFrame({
+            data_config.id_col: ids_neg.values,
+            "reliability_score": reliability_scores,
+            "mu": scorer.components_["mu"],
+            "sigma": scorer.components_["sigma"],
+            "entropy": scorer.components_["H"],
+            "agreement": scorer.components_["A"],
+            "density": scorer.components_["D"],
+            "classification": np.where(
+                classification["reliable"], "reliable",
+                np.where(classification["uncertain"], "uncertain", "suspect")
+            ),
+        })
+        if probe_anchor_ids is not None:
+            var_within, var_between = variance_decomposition(predictions_matrix, probe_anchor_ids)
+            df_scores["var_within_anchor"] = var_within
+            df_scores["var_between_anchor"] = var_between
+        df_scores.to_csv(output_dir / "reliability_scores.csv", index=False)
 
     # Run ablation across target sizes
     all_results = []
@@ -291,6 +353,7 @@ def main():
                     "target_size": target_size,
                     "method": variant,
                     "run": run + 1,
+                    "support_sha256": array_sha256(X_support, y_support),
                     "val_roc_auc": val_metrics["roc_auc"],
                     "val_pr_auc": val_metrics["pr_auc"],
                     "val_f1": val_metrics["f1"],
@@ -309,20 +372,29 @@ def main():
         # --- Neg-sampling strategies (using shared reliability scores) ---
         for method in NEG_SAMPLING_METHODS:
             logger.info("  Evaluating method: %s", method)
-            support_config = SupportSetConfig(neg_sampling_strategy=method)
-            selector = SupportSetSelector(support_config, reliability_config, neg_sampling_strategy=method)
+            if support_sets_src is not None:
+                csv_path = support_sets_src / f"target_{target_size}" / f"support_set_{method}.csv"
+                if not csv_path.exists():
+                    logger.warning("  %s not found in source dir; skipping method", csv_path)
+                    continue
+                X_support, y_support = load_support_set_csv(
+                    csv_path, feature_columns, data_config.label_col)
+                sel_pos_idx = sel_neg_idx = None
+            else:
+                support_config = SupportSetConfig(neg_sampling_strategy=method)
+                selector = SupportSetSelector(support_config, reliability_config, neg_sampling_strategy=method)
 
-            (X_support, y_support), (sel_pos_idx, sel_neg_idx) = selector.build_optimized_support_set(
-                X_positives=X_pos,
-                y_positives=y_pos,
-                X_negatives=X_neg,
-                y_negatives=y_neg,
-                neg_reliability_scores=reliability_scores,
-                neg_prediction_vectors=prediction_vectors,
-                neg_classification=classification,
-                n_neg_override=n_half,
-                random_state=args.seed,
-            )
+                (X_support, y_support), (sel_pos_idx, sel_neg_idx) = selector.build_optimized_support_set(
+                    X_positives=X_pos,
+                    y_positives=y_pos,
+                    X_negatives=X_neg,
+                    y_negatives=y_neg,
+                    neg_reliability_scores=reliability_scores,
+                    neg_prediction_vectors=prediction_vectors,
+                    neg_classification=classification,
+                    n_neg_override=n_half,
+                    random_state=args.seed,
+                )
 
             val_proba = multi_gpu.predict_proba_parallel(
                 X_support, y_support, X_val_np,
@@ -340,6 +412,7 @@ def main():
                 "target_size": target_size,
                 "method": method,
                 "run": 1,
+                "support_sha256": array_sha256(X_support, y_support),
                 "val_roc_auc": val_metrics["roc_auc"],
                 "val_pr_auc": val_metrics["pr_auc"],
                 "val_f1": val_metrics["f1"],
@@ -355,18 +428,21 @@ def main():
             logger.info("    %s: val_pr_auc=%.4f, test_pr_auc=%.4f",
                         method, val_metrics["pr_auc"], test_metrics["pr_auc"])
 
-            # Save support set for this method + target-size
-            method_dir = output_dir / f"target_{target_size}"
-            method_dir.mkdir(parents=True, exist_ok=True)
-            neg_ids_sel = ids_neg.iloc[sel_neg_idx].reset_index(drop=True)
-            support_ids = pd.concat([
-                ids_pos.iloc[sel_pos_idx].reset_index(drop=True),
-                neg_ids_sel,
-            ], ignore_index=True)
-            df_support = pd.DataFrame(X_support, columns=feature_columns)
-            df_support.insert(0, data_config.id_col, support_ids.values)
-            df_support[data_config.label_col] = y_support
-            df_support.to_csv(method_dir / f"support_set_{method}.csv", index=False)
+            # Save support set for this method + target-size (fresh-selection
+            # mode only; in reuse mode the source dir already holds the files
+            # and the support_sha256 column ties results to them).
+            if support_sets_src is None:
+                method_dir = output_dir / f"target_{target_size}"
+                method_dir.mkdir(parents=True, exist_ok=True)
+                neg_ids_sel = ids_neg.iloc[sel_neg_idx].reset_index(drop=True)
+                support_ids = pd.concat([
+                    ids_pos.iloc[sel_pos_idx].reset_index(drop=True),
+                    neg_ids_sel,
+                ], ignore_index=True)
+                df_support = pd.DataFrame(X_support, columns=feature_columns)
+                df_support.insert(0, data_config.id_col, support_ids.values)
+                df_support[data_config.label_col] = y_support
+                df_support.to_csv(method_dir / f"support_set_{method}.csv", index=False)
 
     # Save all results
     df_results = pd.DataFrame(all_results)
@@ -400,6 +476,13 @@ def main():
                     row["test_f1_mean"], row["test_precision_mean"], row["test_recall_mean"])
 
     # Save manifest
+    model_type_labels = {
+        "tabicl": "TabICLClassifier",
+        "tabpfn": "TabPFNClassifier (v2 line, pip tabpfn==2.2.1)",
+        "tabpfn_v25": "TabPFNClassifier (v2.5, pip tabpfn>=8.0.0)",
+        "tabpfn_v3": "TabPFNClassifier (v3, pip tabpfn>=8.0.0)",
+        "tabdpt": "TabDPTClassifier (via _TabDPTAdapter)",
+    }
     manifest = {
         "artifact_type": "ablation_target_size",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -409,12 +492,18 @@ def main():
             "n_val": len(y_val),
             "n_test": len(y_test),
         },
+        "input_hashes": {
+            "X_train": array_sha256(X_train_np, y_train),
+            "X_val": array_sha256(X_val_np, y_val),
+            "X_test": array_sha256(X_test_np, y_test),
+        },
         "model": {
-            "model_type": "TabPFNClassifier (v2)" if args.model == "tabpfn" else "TabICLClassifier",
+            "model_type": model_type_labels[args.model],
             "model_family": args.model,
             "model_path": tabicl_config.model_path,
             "n_estimators": tabicl_config.n_estimators,
             "kv_cache": tabicl_config.kv_cache,
+            "tabdpt_context_size": args.tabdpt_context_size if args.model == "tabdpt" else None,
         },
         "experiment": {
             "target_sizes": target_sizes,
@@ -425,6 +514,7 @@ def main():
                 "baseline_fully_random": "random positives + random negatives (paper main comparison)",
                 "baseline_diverse_pos": "diversity-selected positives + random negatives (ablation; was 'baseline_random' in runs before this change)",
             },
+            "support_sets_source": str(support_sets_src) if support_sets_src is not None else None,
             "K": args.K,
             "probe_design": args.probe_design,
             "n_anchors": args.n_anchors if args.probe_design == "anchored" else None,
@@ -433,7 +523,7 @@ def main():
             "threshold_method": args.threshold_method,
             "reliable_percentile": args.reliable_percentile,
             "suspect_percentile": args.suspect_percentile,
-            "resolved_thresholds": scorer.resolved_thresholds_,
+            "resolved_thresholds": scorer.resolved_thresholds_ if scorer is not None else None,
             "n_reliable": n_reliable,
             "n_uncertain": n_uncertain,
             "n_suspect": n_suspect,

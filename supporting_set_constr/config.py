@@ -8,12 +8,26 @@ FEATURE_IMPORTANCE_PATH = PROJECT_ROOT / "exp" / "20260717_0807_importance" / "c
 
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "tabicl-main" / "checkpoints" / "tabicl-classifier-v2-20260212.ckpt"
 
-# TabPFN v2 checkpoint (download token-free from
-# huggingface.co/Prior-Labs/TabPFN-v2-clf and place it here; the tabPFN-main
-# folder is the locally installed TabPFN package, mirroring tabicl-main).
-DEFAULT_TABPFN_MODEL_PATH = (PROJECT_ROOT / "tabPFN-main" / "checkpoints"
-                             / "tabpfn-checkpoints"
-                             / "tabpfn-v2-classifier-finetuned-zk73skhh.ckpt")
+# TabPFN v2-line checkpoints (download token-free from
+# huggingface.co/Prior-Labs/TabPFN-v2-clf and place them here; the TabPFN-main
+# folder mirrors tabicl-main). NOTE: the "finetuned-zk73skhh" checkpoint is the
+# continued-pretraining-on-real-data variant that TALENT registers as
+# Real-TabPFN; the vanilla Nature-paper v2 model is tabpfn-v2-classifier.ckpt.
+# Both load through the same pip tabpfn==2.2.1 TabPFNClassifier — choose the
+# variant with --model-path.
+DEFAULT_TABPFN_MODEL_PATH = (PROJECT_ROOT / "TabPFN-main" / "checkpoints" / "tabpfn-v2-classifier-finetuned-zk73skhh.ckpt")
+DEFAULT_TABPFN_VANILLA_MODEL_PATH = (PROJECT_ROOT / "TabPFN-main" / "checkpoints" / "tabpfn-v2-classifier.ckpt")
+
+# Default checkpoint per --model family. None = the upstream package resolves
+# its own weights (auto-download where internet is available; on the offline
+# server always pass --model-path / pre-populate the HF cache).
+DEFAULT_MODEL_PATHS = {
+    "tabicl": DEFAULT_MODEL_PATH,
+    "tabpfn": DEFAULT_TABPFN_MODEL_PATH,  # = Real-TabPFN variant, see note above
+    "tabpfn_v25": None,  # needs pip tabpfn>=8.0.0 (separate conda env)
+    "tabpfn_v3": None,   # needs pip tabpfn>=8.0.0 (separate conda env)
+    "tabdpt": None,      # pip tabdpt; weights via path or HF cache
+}
 
 
 @dataclass
@@ -44,10 +58,15 @@ class DataConfig:
 
 @dataclass
 class TabICLConfig:
-    # "tabicl" (default) or "tabpfn" (pip tabpfn==2.2.1, v2 weights from
-    # Prior-Labs/TabPFN-v2-clf on HuggingFace — no token needed for v2).
-    # Shared knobs (n_estimators, softmax_temperature, random_state,
-    # model_path) apply to both; batch_size/kv_cache/verbose are TabICL-only.
+    # Model families:
+    #   "tabicl"      pip tabicl (bundled checkpoint)
+    #   "tabpfn"      pip tabpfn==2.2.1 (v2 line; vanilla or Real-TabPFN via model_path)
+    #   "tabpfn_v25"  pip tabpfn>=8.0.0, version pinned to v2.5
+    #   "tabpfn_v3"   pip tabpfn>=8.0.0 (its default model)
+    #   "tabdpt"      pip tabdpt (ICL + retrieval; runtime knobs bound in adapter)
+    # Shared knobs (n_estimators, softmax_temperature, random_state, model_path)
+    # apply where the upstream constructor accepts them (unsupported kwargs are
+    # filtered by signature); batch_size/kv_cache/verbose are TabICL-only.
     model_family: str = "tabicl"
     model_path: Optional[str] = str(DEFAULT_MODEL_PATH)
     n_estimators: int = 8
@@ -56,6 +75,9 @@ class TabICLConfig:
     kv_cache: bool = True
     random_state: int = 42
     verbose: bool = False
+    # TabDPT-only: rows retrieved per query from the fitted support set
+    # (clamped to the support-set size at fit time).
+    tabdpt_context_size: int = 2048
 
 
 @dataclass
