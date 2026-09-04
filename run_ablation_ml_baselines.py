@@ -220,8 +220,8 @@ def main():
     loader = DataLoader(data_config)
     data = loader.load_all()
     X_train, y_train, ids_train = data["train"]
-    X_val, y_val, _ = data["val"]
-    X_test, y_test, _ = data["test"]
+    X_val, y_val, ids_val = data["val"]
+    X_test, y_test, ids_test = data["test"]
 
     feature_columns = X_train.columns.tolist()
     cat_cols = [c for c in feature_columns if c in loader.categorical_encodings_]
@@ -259,6 +259,17 @@ def main():
         raise SystemExit("--support-sets is required for sampling=support_csv")
 
     all_results = []
+    predictions_dir = output_dir / "predictions"
+    predictions_dir.mkdir(exist_ok=True)
+
+    def _save_predictions(tag, split, ids, y_true, proba):
+        # Per-sample P(bogus) so PR/ROC curves can be drawn later without
+        # re-training (predictions/<model>_<method>_t<size>_r<run>_<split>.csv).
+        pd.DataFrame({
+            data_config.id_col: ids.values,
+            "label": y_true,
+            "p_bogus": proba[:, 0],
+        }).to_csv(predictions_dir / f"{tag}_{split}.csv", index=False)
 
     def evaluate(model_name, sampling, target_size, run, X_sup, y_sup):
         X_sup_df = pd.DataFrame(X_sup, columns=feature_columns)
@@ -271,6 +282,10 @@ def main():
         test_proba = model.predict_proba(frame(X_test_df, cat_cols))
         test_metrics = compute_metrics(y_test, test_proba,
                                        threshold=val_metrics["optimal_threshold"])
+
+        tag = f"{model_name}_{sampling}_t{target_size}_r{run}"
+        _save_predictions(tag, "val", ids_val, y_val, val_proba)
+        _save_predictions(tag, "test", ids_test, y_test, test_proba)
         all_results.append({
             "target_size": target_size, "model": model_name, "method": sampling,
             "run": run,
