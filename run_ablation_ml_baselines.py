@@ -178,7 +178,9 @@ def main():
     parser.add_argument("--setting", type=str, required=True)
     parser.add_argument("--top-features", type=int, default=150)
     parser.add_argument("--target-sizes", type=str, required=True,
-                        help="Comma-separated training-set sizes (support-set analog)")
+                        help="Comma-separated training-set sizes (support-set analog). "
+                             "'all' = the entire training set as-is: no balancing, no "
+                             "sampling (one run per model, method column 'full_train')")
     parser.add_argument("--models", type=str, default="xgboost,lightgbm,catboost",
                         help=f"Comma-separated subset of {ML_MODELS}")
     parser.add_argument("--sampling", type=str, default="baseline_random,score_filtered,score_top",
@@ -196,7 +198,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    target_sizes = [int(s.strip()) for s in args.target_sizes.split(",")]
+    target_sizes = [s.strip() if s.strip() == "all" else int(s.strip())
+                    for s in args.target_sizes.split(",")]
     models = [m.strip() for m in args.models.split(",")]
     samplings = [s.strip() for s in args.sampling.split(",")]
     for m in models:
@@ -283,6 +286,17 @@ def main():
                     model_name, sampling, run, val_metrics["pr_auc"], test_metrics["pr_auc"])
 
     for target_size in target_sizes:
+        if target_size == "all":
+            # Entire training set as-is: no balancing, no sampling — the
+            # natural class ratio and every row, suspects included. One run
+            # per model; sampling methods do not apply.
+            logger.info("=== Target size: all (%d rows: %d pos + %d neg, natural ratio) ===",
+                        len(y_train), len(X_pos), len(X_neg))
+            for model_name in models:
+                evaluate(model_name, "full_train", len(y_train), 1,
+                         X_train.values, y_train)
+            continue
+
         n_half = target_size // 2
         logger.info("=== Target size: %d (%d pos + %d neg) ===", target_size, n_half, n_half)
 
